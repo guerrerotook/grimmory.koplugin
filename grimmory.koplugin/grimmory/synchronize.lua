@@ -2,9 +2,18 @@ local ReadCollection = require("readcollection")
 local md5 = require("ffi/MD5")
 local util = require("util")
 
+local BookType = require("grimmory/book_type")
 local GrimmoryLogger = require("grimmory/logger")
 
 local logger = GrimmoryLogger:new()
+
+-- A request that failed without a HTTP status may still have been
+-- delivered (for example a timeout while reading the response).
+---@param code number | nil
+---@return boolean
+local function is_ambiguous_failure(code)
+    return code == nil or code == 0
+end
 
 ---@class GrimmorySynchronize
 ---@field repository GrimmoryLocalRepository
@@ -69,6 +78,73 @@ function GrimmorySynchronize:pushBookProgress(book_id, callback)
     end
 end
 
+-- Builds a lookup that turns a session into the locations Grimmory
+-- stores.  CFIs are preferred so locations line up with annotations, but
+-- documents without XPointers (PDFs, comics, ...) fall back to the page
+-- number.
+---@param sessions ReadingSession[]
+---@return fun(session: ReadingSession): string | nil, string | nil
+function GrimmorySynchronize:getSessionLocations(sessions)
+    local cfi_by_book_path = {}
+
+    local xpointers_by_book_path = {}
+    for _, session in ipairs(sessions) do
+        for _, xpointer in ipairs({ session.start_xpointer, session.end_xpointer }) do
+            if xpointer ~= nil then
+                if xpointers_by_book_path[session.book_path] == nil then
+                    xpointers_by_book_path[session.book_path] = {}
+                end
+
+                table.insert(xpointers_by_book_path[session.book_path], xpointer)
+            end
+        end
+    end
+
+    for book_path, xpointers in pairs(xpointers_by_book_path) do
+        local ok, resolved = pcall(
+            self.reading_annotations.resolveXPointersToCFI,
+            self.reading_annotations,
+            book_path,
+            xpointers
+        )
+
+        if ok then
+            cfi_by_book_path[book_path] = resolved
+        else
+            logger:err("Unable to resolve session locations for book:", book_path, "-", resolved)
+            cfi_by_book_path[book_path] = {}
+        end
+    end
+
+    ---@param session ReadingSession
+    ---@param xpointer string | nil
+    ---@param page number
+    ---@return string | nil location
+    local function location_for(session, xpointer, page)
+        local cfi = (
+            xpointer ~= nil and
+            cfi_by_book_path[session.book_path] and
+            cfi_by_book_path[session.book_path][xpointer]
+        )
+
+        if cfi then
+            return cfi
+        end
+
+        if page == nil then
+            return nil
+        end
+
+        return tostring(page)
+    end
+
+    return function(session)
+        return
+            location_for(session, session.start_xpointer, session.start_page),
+            location_for(session, session.end_xpointer, session.end_page)
+    end
+end
+
 ---@param book_id integer
 ---@param callback function
 function GrimmorySynchronize:pushBookSessions(book_id, callback)
@@ -85,6 +161,8 @@ function GrimmorySynchronize:pushBookSessions(book_id, callback)
 
     local sessions = self.repository:getPendingSessions(book_id)
 
+    local session_locations = self:getSessionLocations(sessions)
+
     for _, session in ipairs(sessions) do
         local total_seconds = session.end_time - session.start_time
         local total_pages = session.end_page - session.start_page + 1
@@ -97,6 +175,10 @@ function GrimmorySynchronize:pushBookSessions(book_id, callback)
                 since = session.end_time,
             })
 
+            -- The session is never going to be recorded, so the watermark
+            -- moves past it to keep its events from being re-scanned.
+            self.repository:updateBookSyncTimestamp(book_id, "sessions", session.end_time)
+
         elseif total_pages < threshold_pages then
             logger:info("Skipped session below page threshold for book", book_id)
             callback({
@@ -104,6 +186,8 @@ function GrimmorySynchronize:pushBookSessions(book_id, callback)
                 bookPath = session.book_path,
                 since = session.end_time,
             })
+
+            self.repository:updateBookSyncTimestamp(book_id, "sessions", session.end_time)
 
         elseif session.grimmory_id == nil then
             logger:err("Session failed recording with error for book: ", book_id, " - ", "No Grimmory ID")
@@ -128,25 +212,45 @@ function GrimmorySynchronize:pushBookSessions(book_id, callback)
                 session.end_page
             )
 
-            local ok, body = self.api:recordSession(
+            local start_location, end_location = session_locations(session)
+
+            local ok, body, code = self.api:recordSession(
                 session.grimmory_id,
                 session.start_time,
                 session.end_time,
                 session.start_progress,
                 session.end_progress,
-                tostring(session.start_page),
-                tostring(session.end_page)
+                start_location,
+                end_location,
+                BookType.fromPath(session.book_path)
             )
+
+            if not ok and is_ambiguous_failure(code) then
+                -- The request may still have been delivered.  Grimmory
+                -- doesn't deduplicate sessions, so it's checked before it
+                -- would be recorded a second time on a later sync.
+                local verify_ok, found = self.api:hasRecordedSession(
+                    session.grimmory_id,
+                    session.start_time,
+                    session.end_time - session.start_time
+                )
+
+                if verify_ok and found then
+                    logger:info("Session was already recorded despite the error for book:", book_id)
+                    ok = true
+                end
+            end
 
             if ok then
                 logger:info("Session recorded successfully for book:", book_id)
+
+                self.repository:updateBookSyncTimestamp(book_id, "sessions", session.end_time)
+
                 callback({
                     state = "session-recorded",
                     bookPath = session.book_path,
                     since = session.end_time,
                 })
-
-                self.repository:updateBookSyncTimestamp(book_id, "sessions", session.end_time)
             else
                 logger:err("Session failed recording with error for book: ", book_id, " - ", body)
                 callback({

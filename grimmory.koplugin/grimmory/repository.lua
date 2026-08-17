@@ -503,9 +503,24 @@ function GrimmoryLocalRepository:getReadingProgress(book_id, cutoff)
     return ok, result
 end
 
+-- Events newer than this cutoff may still belong to a session that is
+-- being read right now.  Waiting a full collapse threshold ensures a
+-- session is only reported once it can no longer grow, so an in-flight
+-- session isn't pushed truncated and then again as a second session.
+---@param now number | nil
+---@return number cutoff
+function GrimmoryLocalRepository.getSessionCutoff(now)
+    return (now or os.time()) - SESSION_COLLAPSE_THRESHOLD
+end
+
 ---@param book_id integer
+---@param cutoff number | nil
 ---@return ReadingSessionEvent[]
-function GrimmoryLocalRepository:getPendingSessionEvents(book_id)
+function GrimmoryLocalRepository:getPendingSessionEvents(book_id, cutoff)
+    if cutoff == nil then
+        cutoff = self.getSessionCutoff()
+    end
+
     local ok, results = with_database(
         self.database_path,
         function(conn)
@@ -529,11 +544,13 @@ function GrimmoryLocalRepository:getPendingSessionEvents(book_id)
                 WHERE
                     e.created_at > COALESCE(bss.last_synced_at, 0)
                     AND
+                    e.created_at < ?
+                    AND
                     b.id = ?
                 ORDER BY b.id ASC, e.created_at ASC
             ]])
 
-            stmt:bind(book_id)
+            stmt:bind(cutoff, book_id)
 
             ---@type ReadingSessionEvent[]
             local results = {}
@@ -594,12 +611,13 @@ local function isPartOfSession(session, event)
 end
 
 ---@param book_id integer
+---@param cutoff number | nil
 ---@return ReadingSession[]
-function GrimmoryLocalRepository:getPendingSessions(book_id)
+function GrimmoryLocalRepository:getPendingSessions(book_id, cutoff)
     ---@type ReadingSession[]
     local sessions = {}
 
-    for _, event in ipairs(self:getPendingSessionEvents(book_id)) do
+    for _, event in ipairs(self:getPendingSessionEvents(book_id, cutoff)) do
         -- Eventually we could figure out progress from start of page
         -- to end of page?  But for now the simplest is to count
         -- progress as a point-in-time.

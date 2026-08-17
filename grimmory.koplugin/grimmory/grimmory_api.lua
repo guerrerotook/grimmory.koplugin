@@ -80,6 +80,28 @@ local function from_json_iso8601(value)
     return from_iso8601(value)
 end
 
+-- Grimmory stores locations as a bounded string column.
+local MAX_LOCATION_LENGTH = 500
+
+---@param location string | nil
+---@return string | nil
+local function truncate_location(location)
+    if location == nil then
+        return nil
+    end
+
+    return location:sub(1, MAX_LOCATION_LENGTH)
+end
+
+---@param duration_seconds number
+---@return string
+local function to_duration_formatted(duration_seconds)
+    local hours = math.floor(duration_seconds / 3600)
+    local minutes = math.floor((duration_seconds % 3600) / 60)
+
+    return string.format("%dh %dm", hours, minutes)
+end
+
 ---@class BookMetadata
 ---@field isbn13 string | nil
 ---@field isbn10 string | nil
@@ -550,8 +572,12 @@ end
 ---@param end_time number
 ---@param start_progress number
 ---@param end_progress number
----@param start_location string
----@param end_location string
+---@param start_location string | nil
+---@param end_location string | nil
+---@param book_type GrimmoryBookType | nil
+---@return boolean ok
+---@return any body
+---@return number code
 function GrimmoryAPI:recordSession(
     book_id,
     start_time,
@@ -559,28 +585,29 @@ function GrimmoryAPI:recordSession(
     start_progress,
     end_progress,
     start_location,
-    end_location
+    end_location,
+    book_type
 )
     local duration_seconds = end_time - start_time
     local progress_delta = math.max(0, end_progress - start_progress)
 
-    local book_type = "EPUB"
-
     local request = {
         bookId = book_id,
+        -- bookType is optional server side, so it's only sent when the
+        -- book's type is known to Grimmory.
         bookType = book_type,
         startTime = to_iso8601(start_time),
         endTime = to_iso8601(end_time),
         durationSeconds = duration_seconds,
-        durationFormatted = nil,
+        durationFormatted = to_duration_formatted(duration_seconds),
         startProgress = start_progress,
         endProgress = end_progress,
         progressDelta = progress_delta,
-        startLocation = start_location,
-        endLocation = end_location,
+        startLocation = truncate_location(start_location),
+        endLocation = truncate_location(end_location),
     }
 
-    local ok, _, body = self:request(
+    local ok, code, body = self:request(
         "POST",
         "/api/v1/reading-sessions",
         request
@@ -590,7 +617,39 @@ function GrimmoryAPI:recordSession(
         logger:err("Unable to record session", body)
     end
 
-    return ok, body
+    return ok, body, code
+end
+
+-- Grimmory doesn't deduplicate reading sessions, so a session that may
+-- have been delivered is looked up before it's recorded again.
+---@param book_id number
+---@param start_time number
+---@param duration_seconds number
+---@return boolean ok
+---@return boolean found
+function GrimmoryAPI:hasRecordedSession(book_id, start_time, duration_seconds)
+    local start_time_iso8601 = to_iso8601(start_time)
+
+    local ok, _, body = self:request(
+        "GET",
+        "/api/v1/reading-sessions/book/" .. tonumber(book_id) .. "?page=0&size=100"
+    )
+
+    if not ok or type(body) ~= "table" then
+        logger:err("Unable to read recorded sessions", body)
+        return false, false
+    end
+
+    for _, session in ipairs(body["content"] or {}) do
+        if
+            from_json_string(session["startTime"]) == start_time_iso8601 and
+            from_json_number(session["durationSeconds"]) == duration_seconds
+        then
+            return true, true
+        end
+    end
+
+    return true, false
 end
 
 function GrimmoryAPI:getKoreaderSync()
