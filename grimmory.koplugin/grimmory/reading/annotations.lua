@@ -267,9 +267,43 @@ function GrimmoryReadingAnnotations:applyAnnotations(book_path, grimmory_annotat
     self.doc_metadata:setAnnotations(book_path, new_annotations)
 end
 
+-- Resolves XPointers (used by KOReader) to CFIs (used by Grimmory) in a
+-- single pass so the document is only opened once.  XPointers that can't
+-- be resolved are left out of the result so callers can fall back.
+---@param book_path string
+---@param xpointers string[]
+---@return table<string, string> cfi_by_xpointer
+function GrimmoryReadingAnnotations:resolveXPointersToCFI(book_path, xpointers)
+    local cfi_by_xpointer = {}
+
+    if #xpointers == 0 then
+        return cfi_by_xpointer
+    end
+
+    with_cfi_resolver(
+        book_path,
+        function(cfi_resolver)
+            for _, xpointer in ipairs(xpointers) do
+                if cfi_by_xpointer[xpointer] == nil then
+                    local ok, cfi = pcall(
+                        cfi_resolver.xpointerToCFI,
+                        cfi_resolver,
+                        xpointer
+                    )
+
+                    if ok and cfi then
+                        cfi_by_xpointer[xpointer] = cfi
+                    end
+                end
+            end
+        end
+    )
+
+    return cfi_by_xpointer
+end
+
 ---@return GrimmoryAnnotation[] annotations
-function GrimmoryReadingAnnotations:getAnnotations(book_path)
-    -- Get annotations for book
+function GrimmoryReadingAnnotations:getAnnotations(book_path)    -- Get annotations for book
     local annotations = self.doc_metadata:getAnnotations(book_path)
 
     local grimmory_annotations = {}
