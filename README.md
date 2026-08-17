@@ -63,4 +63,4 @@ sync.
 
 Distributed under the terms of the [AGPL-3.0 License](./LICENSE).
 
-[latest-plugin]: https://github.com/grimmory-tools/grimmory.koplugin/releases/latest/download/grimmory.koplugin.zip
+[latest-plugin]: https://github.com/guerrerotook/grimmory.koplugin/releases/latest/download/grimmory.koplugin.zip
