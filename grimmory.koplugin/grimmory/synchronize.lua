@@ -78,71 +78,26 @@ function GrimmorySynchronize:pushBookProgress(book_id, callback)
     end
 end
 
--- Builds a lookup that turns a session into the locations Grimmory
--- stores.  CFIs are preferred so locations line up with annotations, but
--- documents without XPointers (PDFs, comics, ...) fall back to the page
--- number.
----@param sessions ReadingSession[]
----@return fun(session: ReadingSession): string | nil, string | nil
-function GrimmorySynchronize:getSessionLocations(sessions)
-    local cfi_by_book_path = {}
-
-    local xpointers_by_book_path = {}
-    for _, session in ipairs(sessions) do
-        for _, xpointer in ipairs({ session.start_xpointer, session.end_xpointer }) do
-            if xpointer ~= nil then
-                if xpointers_by_book_path[session.book_path] == nil then
-                    xpointers_by_book_path[session.book_path] = {}
-                end
-
-                table.insert(xpointers_by_book_path[session.book_path], xpointer)
-            end
-        end
+-- Session locations are reported as page numbers.  Grimmory only renders
+-- a location it recognises as a page (or an audiobook timestamp), so a
+-- CFI would be stored but shown as "-" in the reading session list.
+---@param page number | nil
+---@return string | nil location
+local function page_location(page)
+    if type(page) ~= "number" or page < 1 then
+        -- A page that isn't known is left out so Grimmory doesn't show
+        -- a bogus "Page 0".
+        return nil
     end
 
-    for book_path, xpointers in pairs(xpointers_by_book_path) do
-        local ok, resolved = pcall(
-            self.reading_annotations.resolveXPointersToCFI,
-            self.reading_annotations,
-            book_path,
-            xpointers
-        )
+    return tostring(math.floor(page))
+end
 
-        if ok then
-            cfi_by_book_path[book_path] = resolved
-        else
-            logger:err("Unable to resolve session locations for book:", book_path, "-", resolved)
-            cfi_by_book_path[book_path] = {}
-        end
-    end
-
-    ---@param session ReadingSession
-    ---@param xpointer string | nil
-    ---@param page number
-    ---@return string | nil location
-    local function location_for(session, xpointer, page)
-        local cfi = (
-            xpointer ~= nil and
-            cfi_by_book_path[session.book_path] and
-            cfi_by_book_path[session.book_path][xpointer]
-        )
-
-        if cfi then
-            return cfi
-        end
-
-        if page == nil then
-            return nil
-        end
-
-        return tostring(page)
-    end
-
-    return function(session)
-        return
-            location_for(session, session.start_xpointer, session.start_page),
-            location_for(session, session.end_xpointer, session.end_page)
-    end
+---@param session ReadingSession
+---@return string | nil start_location
+---@return string | nil end_location
+local function session_locations(session)
+    return page_location(session.start_page), page_location(session.end_page)
 end
 
 ---@param book_id integer
@@ -160,8 +115,6 @@ function GrimmorySynchronize:pushBookSessions(book_id, callback)
     logger:info("Synchronizing reading sessions for:", book_id)
 
     local sessions = self.repository:getPendingSessions(book_id)
-
-    local session_locations = self:getSessionLocations(sessions)
 
     for _, session in ipairs(sessions) do
         local total_seconds = session.end_time - session.start_time

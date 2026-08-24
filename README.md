@@ -47,6 +47,9 @@ Sessions are collected from page turns while you read and are only sent
 once a session has ended, so a session that is still in progress is never
 reported twice.
 
+The pages you started and finished on are sent as the session location,
+which Grimmory shows in the reading session list.
+
 Short sessions can be filtered out with:
 
 **Tools** -> **Grimmory** -> **Reading Session Thresholds**

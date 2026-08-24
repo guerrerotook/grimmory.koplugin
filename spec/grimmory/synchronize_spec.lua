@@ -321,67 +321,35 @@ describe("GrimmorySynchronize", function()
             )
         end)
 
-        it("prefers CFI locations when the xpointers resolve", function()
+        it("sends page numbers as locations for reflowable books", function()
+            -- Grimmory only renders locations it recognises as pages, so
+            -- a CFI would be stored and then shown as "-".
             local synchronize = make_synchronize({
                 make_session({
                     start_xpointer = "/body/DocFragment[1]/p[1]",
                     end_xpointer = "/body/DocFragment[2]/p[3]",
                 })
             })
-
-            synchronize.reading_annotations.resolveXPointersToCFI = spy.new(function()
-                return {
-                    ["/body/DocFragment[1]/p[1]"] = "epubcfi(/6/2!/4/2)",
-                    ["/body/DocFragment[2]/p[3]"] = "epubcfi(/6/4!/4/6)",
-                }
-            end)
-
-            synchronize:pushBookSessions(1, function() end)
-
-            assert.spy(synchronize.api.recordSession).was.called_with(
-                synchronize.api,
-                42, 1000, 2000, 10, 20,
-                "epubcfi(/6/2!/4/2)", "epubcfi(/6/4!/4/6)", "EPUB"
-            )
-        end)
-
-        it("falls back to page numbers when an xpointer can't be resolved", function()
-            local synchronize = make_synchronize({
-                make_session({
-                    start_xpointer = "/body/DocFragment[1]/p[1]",
-                    end_xpointer = "/body/DocFragment[2]/p[3]",
-                })
-            })
-
-            synchronize.reading_annotations.resolveXPointersToCFI = spy.new(function()
-                return {
-                    ["/body/DocFragment[1]/p[1]"] = "epubcfi(/6/2!/4/2)",
-                }
-            end)
-
-            synchronize:pushBookSessions(1, function() end)
-
-            assert.spy(synchronize.api.recordSession).was.called_with(
-                synchronize.api,
-                42, 1000, 2000, 10, 20,
-                "epubcfi(/6/2!/4/2)", "20", "EPUB"
-            )
-        end)
-
-        it("falls back to page numbers when resolving locations fails", function()
-            local synchronize = make_synchronize({
-                make_session({ start_xpointer = "/body/DocFragment[1]/p[1]" })
-            })
-
-            synchronize.reading_annotations.resolveXPointersToCFI = spy.new(function()
-                error("document could not be opened")
-            end)
 
             synchronize:pushBookSessions(1, function() end)
 
             assert.spy(synchronize.api.recordSession).was.called_with(
                 synchronize.api,
                 42, 1000, 2000, 10, 20, "10", "20", "EPUB"
+            )
+            assert.spy(synchronize.reading_annotations.resolveXPointersToCFI).was_not.called()
+        end)
+
+        it("omits locations when the pages are unknown", function()
+            local synchronize = make_synchronize({
+                make_session({ start_page = 0, end_page = 0 })
+            })
+
+            synchronize:pushBookSessions(1, function() end)
+
+            assert.spy(synchronize.api.recordSession).was.called_with(
+                synchronize.api,
+                42, 1000, 2000, 10, 20, nil, nil, "EPUB"
             )
         end)
 
