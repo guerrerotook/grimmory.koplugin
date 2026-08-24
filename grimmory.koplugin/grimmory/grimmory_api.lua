@@ -259,6 +259,11 @@ local function multipart_body(fields, file_field, file_path)
             ltn12.source.file(file),
             ltn12.source.string(tail_text)
         ),
+        -- `ltn12.source.file` closes the handle once it has been read to
+        -- the end, but a request that is never sent leaves it open.
+        close = function()
+            pcall(function() file:close() end)
+        end,
     }
 end
 
@@ -860,6 +865,8 @@ function GrimmoryAPI:uploadBook(file_path, library_id, path_id)
         body
     )
 
+    body.close()
+
     if not ok then
         logger:err("Unable to upload book:", file_path, "-", response)
 
@@ -896,11 +903,15 @@ end
 -- Grimmory has no way to look a book up by its file name, and it renames
 -- an uploaded file to match the library's naming pattern, so the book is
 -- searched for by title with the file name only used to confirm a match.
+-- When `strict` is set, a book only matches if both its file name and
+-- its title line up, which is what tells an upload that was refused as a
+-- duplicate apart from an unrelated book that merely shares a name.
 ---@param title string | nil
 ---@param filename string | nil
+---@param strict boolean | nil
 ---@return boolean ok
 ---@return Book | nil book
-function GrimmoryAPI:findBook(title, filename)
+function GrimmoryAPI:findBook(title, filename, strict)
     local queries = {}
 
     if title ~= nil and title ~= "" then
@@ -932,11 +943,19 @@ function GrimmoryAPI:findBook(title, filename)
                 book_filename = normalize_for_match(book.primary_file.filename)
             end
 
-            if wanted_filename ~= nil and book_filename == wanted_filename then
-                return true, book
-            end
+            local book_title = normalize_for_match(book.metadata.title)
 
-            if wanted_title ~= nil and normalize_for_match(book.metadata.title) == wanted_title then
+            local filename_matches = wanted_filename ~= nil and book_filename == wanted_filename
+            local title_matches = wanted_title ~= nil and book_title == wanted_title
+
+            if strict then
+                if
+                    wanted_filename ~= nil and wanted_title ~= nil and
+                    filename_matches and title_matches
+                then
+                    return true, book
+                end
+            elseif filename_matches or title_matches then
                 return true, book
             end
         end

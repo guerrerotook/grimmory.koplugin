@@ -476,6 +476,32 @@ describe("GrimmoryAPI findBook", function()
         assert.is_nil(book)
     end)
 
+    it("requires the title and file name to match in strict mode", function()
+        local api = make_search_api({
+            ["An%20Article"] = {
+                { id = 5, metadata = { title = "Another Article" }, primaryFile = { fileName = "An Article.epub" } },
+            },
+        })
+
+        local ok, book = api:findBook("An Article", "An Article.epub", true)
+
+        assert.is_true(ok)
+        assert.is_nil(book)
+    end)
+
+    it("matches in strict mode when both the title and file name line up", function()
+        local api = make_search_api({
+            ["An%20Article"] = {
+                { id = 6, metadata = { title = "An Article" }, primaryFile = { fileName = "An Article.epub" } },
+            },
+        })
+
+        local ok, book = api:findBook("An Article", "An Article.epub", true)
+
+        assert.is_true(ok)
+        assert.are.equal(6, book.id)
+    end)
+
     it("reports a failure without anything to search for", function()
         local api = make_search_api({})
 

@@ -192,7 +192,7 @@ describe("GrimmoryUpload", function()
             assert.are.equal("book-upload-error", states[1].state)
         end)
 
-        it("treats an existing file as uploaded", function()
+        it("removes the local copy of a duplicate only after a strict match", function()
             local upload, api = make_upload({
                 uploadBook = spy.new(function() return false, 409, "File already exists" end),
             })
@@ -200,9 +200,24 @@ describe("GrimmoryUpload", function()
 
             upload:uploadBooks(collect_states(states))
 
-            assert.spy(api.findBook).was_called()
+            assert.spy(api.findBook).was_called_with(
+                api, "An Article", "article.epub", true
+            )
             assert.are.same({ "/mnt/onboard/wikipedia/article.epub" }, removed_files)
             assert.are.equal("book-uploaded", states[1].state)
+        end)
+
+        it("keeps the local copy when a different book owns the name", function()
+            local upload = make_upload({
+                uploadBook = spy.new(function() return false, 409, "File already exists" end),
+                findBook = spy.new(function() return true, nil end),
+            })
+            local states = {}
+
+            upload:uploadBooks(collect_states(states))
+
+            assert.are.same({}, removed_files)
+            assert.are.equal("book-upload-error", states[1].state)
         end)
 
         it("keeps the local copy when the shelf cannot be assigned", function()
@@ -256,6 +271,33 @@ describe("GrimmoryUpload", function()
             upload:uploadBooks(collect_states({}))
 
             assert.spy(api.uploadBook).was_not_called()
+        end)
+
+        it("does nothing when the upload directory is inside the download directory", function()
+            local upload, api = make_upload(nil, {
+                getUploadDirectory = function() return "/mnt/onboard/grimmory/wikipedia" end,
+            })
+
+            upload:uploadBooks(collect_states({}))
+
+            assert.spy(api.uploadBook).was_not_called()
+        end)
+
+        it("skips books that live in the download directory", function()
+            fake_files = {
+                "/mnt/onboard/grimmory/downloaded.epub",
+                "/mnt/onboard/article.epub",
+            }
+
+            local upload, api = make_upload(nil, {
+                getUploadDirectory = function() return "/mnt/onboard" end,
+            })
+
+            upload:uploadBooks(collect_states({}))
+
+            assert.spy(api.uploadBook).was_called(1)
+            assert.spy(api.uploadBook).was_called_with(api, "/mnt/onboard/article.epub", 1, 2)
+            assert.are.same({ "/mnt/onboard/article.epub" }, removed_files)
         end)
 
         it("does nothing without a library", function()

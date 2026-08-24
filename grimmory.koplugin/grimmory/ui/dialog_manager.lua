@@ -10,6 +10,7 @@ local UIManager = require("ui/uimanager")
 local PathChooser = require("ui/widget/pathchooser")
 local ProgressbarDialog = require("ui/widget/progressbardialog")
 
+local GrimmoryUpload = require("grimmory/upload")
 local GrimmoryLogger = require("grimmory/logger")
 
 local logger = GrimmoryLogger:new()
@@ -326,10 +327,10 @@ function DialogManager:showUploadDirectorySettings()
         show_files = false,
         path = current_directory ~= "" and current_directory or nil,
         onConfirm = function(newPath)
-            if newPath == self.settings:getDownloadDirectory() then
+            if GrimmoryUpload.isDownloadDirectory(newPath, self.settings:getDownloadDirectory()) then
                 -- Watching the download folder would send every book that
                 -- was just downloaded straight back to Grimmory.
-                self:toast(_("The upload folder cannot be the download folder"))
+                self:toast(_("The upload folder cannot be inside the download folder"))
                 return
             end
 

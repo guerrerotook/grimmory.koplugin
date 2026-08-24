@@ -39,7 +39,55 @@ end
 ---@param path string
 ---@return string
 local function normalize_directory(path)
-    return tostring(path or ""):gsub("/+$", "")
+    return (tostring(path or ""):gsub("/+$", ""))
+end
+
+-- The download directory may be stored relative to KOReader while the
+-- upload directory always comes from the path chooser, so both have to be
+-- resolved before they can be compared.
+---@param path string | nil
+---@return string
+local function resolve_directory(path)
+    path = tostring(path or "")
+
+    if path == "" then
+        return ""
+    end
+
+    local resolved = nil
+
+    if util.realpath ~= nil then
+        local ok, result = pcall(util.realpath, path)
+
+        if ok then
+            resolved = result
+        end
+    end
+
+    return normalize_directory(resolved or path)
+end
+
+---@param path string
+---@param directory string
+---@return boolean
+local function is_within(path, directory)
+    if directory == "" or path == "" then
+        return false
+    end
+
+    return path == directory or path:sub(1, #directory + 1) == directory .. "/"
+end
+
+-- Uploading from the folder books are downloaded into would send every
+-- downloaded book straight back to Grimmory.
+---@param upload_directory string | nil
+---@param download_directory string | nil
+---@return boolean
+local function is_download_directory(upload_directory, download_directory)
+    return is_within(
+        resolve_directory(upload_directory),
+        resolve_directory(download_directory)
+    )
 end
 
 ---@class GrimmoryUpload
@@ -54,6 +102,8 @@ function GrimmoryUpload:new(o)
     self.__index = self
     return o
 end
+
+GrimmoryUpload.isDownloadDirectory = is_download_directory
 
 ---@param path string
 ---@return boolean
@@ -88,13 +138,21 @@ function GrimmoryUpload:isUploadableFile(path)
     return true
 end
 
+---@param directory string
+---@param excluded_directory string | nil
 ---@return string[] paths
-function GrimmoryUpload:findUploadableFiles(directory)
+function GrimmoryUpload:findUploadableFiles(directory, excluded_directory)
     local paths = {}
 
     util.findFiles(
         directory,
         function(path)
+            if excluded_directory ~= nil and is_within(path, excluded_directory) then
+                -- A book that lives in the download folder came from
+                -- Grimmory in the first place.
+                return
+            end
+
             if self:isUploadableFile(path) then
                 table.insert(paths, path)
             end
@@ -125,10 +183,11 @@ end
 -- copy is only removed once the server really has it.
 ---@param title string | nil
 ---@param filename string
+---@param strict boolean | nil
 ---@return Book | nil book
-function GrimmoryUpload:waitForProcessedBook(title, filename)
+function GrimmoryUpload:waitForProcessedBook(title, filename, strict)
     for attempt = 1, PROCESSING_ATTEMPTS do
-        local ok, book = self.api:findBook(title, filename)
+        local ok, book = self.api:findBook(title, filename, strict)
 
         if ok and book ~= nil then
             return book
@@ -172,10 +231,14 @@ function GrimmoryUpload:uploadBook(path, callback)
 
     local upload_ok, code, message = self.api:uploadBook(path, library.id, library.path_id)
 
-    if not upload_ok and code ~= 409 then
-        -- A 409 means the server already holds a file with this name, so
-        -- the upload has nothing left to do and the book can be looked up
-        -- like any other.
+    -- A 409 means Grimmory refused the file because it already holds one
+    -- with that name.  That is what an upload whose book has not been
+    -- created yet looks like on a retry, but it is also what an unrelated
+    -- book that happens to share a name looks like, so the book it refers
+    -- to has to match this file exactly before the local copy is removed.
+    local is_duplicate = not upload_ok and code == 409
+
+    if not upload_ok and not is_duplicate then
         logger:err("Failed to upload book:", path, "-", message)
 
         callback({
@@ -187,9 +250,23 @@ function GrimmoryUpload:uploadBook(path, callback)
         return
     end
 
-    local book = self:waitForProcessedBook(title, filename)
+    local book = self:waitForProcessedBook(title, filename, is_duplicate)
 
     if book == nil then
+        if is_duplicate then
+            -- Grimmory holds a different book under this name, so there is
+            -- nothing to retry and the file stays where it is.
+            logger:err("A different book already exists in Grimmory for:", path)
+
+            callback({
+                state = "book-upload-error",
+                book_path = path,
+                message = message,
+            })
+
+            return
+        end
+
         -- The file is on the server but no book exists for it yet.  The
         -- local copy stays put so the next sync can finish the job.
         logger:warn("Grimmory has not processed the uploaded book yet:", path)
@@ -243,16 +320,16 @@ function GrimmoryUpload:uploadBooks(callback)
         return
     end
 
-    local directory = normalize_directory(self.settings:getUploadDirectory())
+    local directory = resolve_directory(self.settings:getUploadDirectory())
 
     if directory == "" then
         logger:err("Book upload skipped because the upload directory is not set")
         return
     end
 
-    if directory == normalize_directory(self.settings:getDownloadDirectory()) then
-        -- Uploading the folder books are downloaded into would send every
-        -- book straight back to the server.
+    local download_directory = resolve_directory(self.settings:getDownloadDirectory())
+
+    if is_within(directory, download_directory) then
         logger:err("Book upload skipped because the upload directory is the download directory")
         return
     end
@@ -269,7 +346,7 @@ function GrimmoryUpload:uploadBooks(callback)
         return
     end
 
-    for _, path in ipairs(self:findUploadableFiles(directory)) do
+    for _, path in ipairs(self:findUploadableFiles(directory, download_directory)) do
         local ok, message = pcall(self.uploadBook, self, path, callback)
 
         if not ok then

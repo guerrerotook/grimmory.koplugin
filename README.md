@@ -79,7 +79,8 @@ Then configure it under:
 
 - **Upload Folder** — the folder that is watched for new books.  Point it
   at the folder KOReader saves Wikipedia articles into.  It cannot be the
-  download folder, otherwise downloaded books would be sent straight back.
+  download folder (or a folder inside it), and books that live in the
+  download folder are never uploaded.
 - **Target Library** — the Grimmory library (and library path) the books
   are uploaded into.
 - **Target Shelf** — an optional shelf the uploaded books are added to.
@@ -93,8 +94,10 @@ file is never sent.
 
 A local copy is only deleted after Grimmory has finished processing the
 book and, when a shelf is configured, after the book has been added to
-that shelf.  Anything else keeps the file on the device so the next sync
-can try again.
+that shelf.  If Grimmory rejects the file because it already holds a book
+with that name, the local copy is only removed when that book really is
+the same one.  Anything else keeps the file on the device so the next
+sync can try again.
 
 ## License
 
