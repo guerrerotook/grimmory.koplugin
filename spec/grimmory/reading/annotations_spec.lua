@@ -135,6 +135,59 @@ describe("GrimmoryReadingAnnotations", function()
                 expected
             )
         end)
+
+        it("overwrites local annotations with the grimmory copy", function()
+            fake_doc_metadata.getAnnotations.returns({
+                {
+                    ["grimmory_id"] = 27,
+                    ["color"] = "red",
+                    ["drawer"] = "underscore",
+                    ["note"] = "local note",
+                    ["pos0"] = "start",
+                    ["pos1"] = "end",
+                },
+            })
+
+            local annotations = GrimmoryReadingAnnotations:new(fake_doc_metadata)
+
+            annotations:applyAnnotations("book_path", {
+                remote_grimmory_annotation
+            })
+
+            local written = fake_doc_metadata.setAnnotations.calls[1].refs[3]
+
+            assert.are.equal("yellow", written[1].color)
+            assert.are.equal("lighten", written[1].drawer)
+            assert.is_nil(written[1].note)
+        end)
+
+        it("keeps local annotations whose changes have not been pushed", function()
+            fake_doc_metadata.getAnnotations.returns({
+                {
+                    ["grimmory_id"] = 27,
+                    ["color"] = "red",
+                    ["drawer"] = "underscore",
+                    ["note"] = "local note",
+                    ["pos0"] = "start",
+                    ["pos1"] = "end",
+                },
+            })
+
+            local annotations = GrimmoryReadingAnnotations:new(fake_doc_metadata)
+
+            annotations:applyAnnotations(
+                "book_path",
+                { remote_grimmory_annotation },
+                { ["27"] = true }
+            )
+
+            local written = fake_doc_metadata.setAnnotations.calls[1].refs[3]
+
+            assert.are.equal("red", written[1].color)
+            assert.are.equal("underscore", written[1].drawer)
+            assert.are.equal("local note", written[1].note)
+            assert.are.equal(27, written[1].grimmory_id)
+        end)
     end)
 
     describe("getAnnotations", function()

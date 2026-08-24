@@ -103,7 +103,197 @@ local function make_synchronize(sessions, api_overrides, settings_overrides)
     })
 end
 
+---@return GrimmorySynchronize
+local function make_annotation_synchronize(local_annotations, modified_ids, api_overrides, settings_overrides)
+    local settings = {
+        getSyncAnnotations = function() return true end,
+    }
+
+    for key, value in pairs(settings_overrides or {}) do
+        settings[key] = value
+    end
+
+    local api = {
+        createAnnotation = spy.new(function() return true, {} end),
+        updateAnnotation = spy.new(function() return true end),
+        deleteAnnotation = spy.new(function() return true end),
+        getAnnotations = spy.new(function() return true, {} end),
+    }
+
+    for key, value in pairs(api_overrides or {}) do
+        api[key] = value
+    end
+
+    local doc_metadata = {
+        getModifiedGrimmoryAnnotations = function() return modified_ids or {} end,
+        removeModifiedGrimmoryAnnotation = spy.new(function() end),
+    }
+
+    local reading_annotations = {
+        getAnnotations = function() return local_annotations or {} end,
+        applyAnnotations = spy.new(function() end),
+    }
+
+    return GrimmorySynchronize:new({
+        settings = settings,
+        api = api,
+        doc_metadata = doc_metadata,
+        reading_annotations = reading_annotations,
+    })
+end
+
 describe("GrimmorySynchronize", function()
+    describe("pushBookAnnotations", function()
+        it("updates annotations that were modified locally", function()
+            local synchronize = make_annotation_synchronize(
+                { { id = 27, cfi = "cfi", text = "text", color = "#4ADE80", style = "underline", note = "note" } },
+                { 27 },
+                {
+                    getAnnotations = spy.new(function()
+                        return true, { { id = 27, cfi = "cfi", text = "text" } }
+                    end),
+                }
+            )
+
+            synchronize:pushBookAnnotations("/books/book.epub", 1)
+
+            assert.spy(synchronize.api.updateAnnotation).was.called_with(
+                synchronize.api, 27, "#4ADE80", "underline", "note"
+            )
+            assert.spy(synchronize.api.deleteAnnotation).was_not.called()
+            assert.spy(synchronize.api.createAnnotation).was_not.called()
+            assert.spy(synchronize.doc_metadata.removeModifiedGrimmoryAnnotation).was.called_with(
+                synchronize.doc_metadata, "/books/book.epub", 27
+            )
+        end)
+
+        it("keeps the modification flag when the update fails", function()
+            local synchronize = make_annotation_synchronize(
+                { { id = 27, cfi = "cfi", text = "text" } },
+                { 27 },
+                {
+                    getAnnotations = spy.new(function()
+                        return true, { { id = 27, cfi = "cfi", text = "text" } }
+                    end),
+                    updateAnnotation = spy.new(function() return false end),
+                }
+            )
+
+            synchronize:pushBookAnnotations("/books/book.epub", 1)
+
+            assert.spy(synchronize.doc_metadata.removeModifiedGrimmoryAnnotation).was_not.called()
+        end)
+
+        it("recreates annotations whose position changed, as the server cannot update it", function()
+            local calls = {}
+
+            local synchronize = make_annotation_synchronize(
+                { { id = 27, cfi = "new-cfi", text = "text" } },
+                { 27 },
+                {
+                    getAnnotations = spy.new(function()
+                        return true, { { id = 27, cfi = "old-cfi", text = "text" } }
+                    end),
+                    createAnnotation = spy.new(function()
+                        table.insert(calls, "create")
+                        return true, {}
+                    end),
+                    deleteAnnotation = spy.new(function()
+                        table.insert(calls, "delete")
+                        return true
+                    end),
+                }
+            )
+
+            synchronize:pushBookAnnotations("/books/book.epub", 1)
+
+            assert.spy(synchronize.api.updateAnnotation).was_not.called()
+            assert.spy(synchronize.api.deleteAnnotation).was.called_with(synchronize.api, 27)
+            assert.spy(synchronize.api.createAnnotation).was.called(1)
+            assert.are.same({ "create", "delete" }, calls)
+        end)
+
+        it("keeps a moved annotation on the server when its replacement fails", function()
+            local synchronize = make_annotation_synchronize(
+                { { id = 27, cfi = "new-cfi", text = "text" } },
+                { 27 },
+                {
+                    getAnnotations = spy.new(function()
+                        return true, { { id = 27, cfi = "old-cfi", text = "text" } }
+                    end),
+                    createAnnotation = spy.new(function() return false, "boom" end),
+                }
+            )
+
+            synchronize:pushBookAnnotations("/books/book.epub", 1)
+
+            -- Dropping the old copy here would leave the highlight
+            -- nowhere: gone from the server and dropped locally by the
+            -- next pull.
+            assert.spy(synchronize.api.deleteAnnotation).was_not.called()
+            assert.spy(synchronize.doc_metadata.removeModifiedGrimmoryAnnotation).was_not.called()
+        end)
+
+        it("deletes annotations that were removed locally", function()
+            local synchronize = make_annotation_synchronize({}, { 27 })
+
+            synchronize:pushBookAnnotations("/books/book.epub", 1)
+
+            assert.spy(synchronize.api.deleteAnnotation).was.called_with(synchronize.api, 27)
+            assert.spy(synchronize.api.updateAnnotation).was_not.called()
+            assert.spy(synchronize.doc_metadata.removeModifiedGrimmoryAnnotation).was.called_with(
+                synchronize.doc_metadata, "/books/book.epub", 27
+            )
+        end)
+
+        it("creates annotations that have no Grimmory ID", function()
+            local synchronize = make_annotation_synchronize(
+                { { cfi = "cfi", chapter = "chapter", text = "text", color = "#FFC107", style = "highlight" } }
+            )
+
+            synchronize:pushBookAnnotations("/books/book.epub", 7)
+
+            assert.spy(synchronize.api.createAnnotation).was.called_with(
+                synchronize.api, 7, "cfi", "chapter", "text", "#FFC107", "highlight", nil
+            )
+        end)
+    end)
+
+    describe("synchronizeBookAnnotations", function()
+        it("pushes and pulls annotations", function()
+            local synchronize = make_annotation_synchronize({})
+
+            synchronize:synchronizeBookAnnotations("/books/book.epub", 7)
+
+            assert.spy(synchronize.api.getAnnotations).was.called_with(synchronize.api, 7)
+            assert.spy(synchronize.reading_annotations.applyAnnotations).was.called(1)
+        end)
+
+        it("does nothing when annotation sync is disabled", function()
+            local synchronize = make_annotation_synchronize(
+                {},
+                { 27 },
+                nil,
+                { getSyncAnnotations = function() return false end }
+            )
+
+            synchronize:synchronizeBookAnnotations("/books/book.epub", 7)
+
+            assert.spy(synchronize.api.getAnnotations).was_not.called()
+            assert.spy(synchronize.api.deleteAnnotation).was_not.called()
+            assert.spy(synchronize.reading_annotations.applyAnnotations).was_not.called()
+        end)
+
+        it("does nothing when the book is not associated with Grimmory", function()
+            local synchronize = make_annotation_synchronize({})
+
+            synchronize:synchronizeBookAnnotations("/books/book.epub", nil)
+
+            assert.spy(synchronize.api.getAnnotations).was_not.called()
+            assert.spy(synchronize.reading_annotations.applyAnnotations).was_not.called()
+        end)
+    end)
+
     describe("pushBookSessions", function()
         it("sends the book type derived from the book path", function()
             local synchronize = make_synchronize({

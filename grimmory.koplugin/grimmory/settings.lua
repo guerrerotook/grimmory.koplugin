@@ -30,7 +30,7 @@ local logger = GrimmoryLogger:new()
 ---@field sync_enable_wifi boolean
 ---@field sync_periodically boolean
 ---@field sync_frequency number
----@field sync_shelves boolean
+---@field download_books boolean
 ---@field download_remove_books boolean
 ---@field sync_target_shelves GrimmoryTargetShelf[]
 ---@field sync_download_directory string
@@ -41,6 +41,11 @@ local logger = GrimmoryLogger:new()
 ---@field sync_retain_empty_shelves boolean
 ---@field device_id string
 ---@field device_name string
+---@field settings_version number
+
+-- Bump when a setting is renamed or its meaning changes, and add the
+-- matching step to `MIGRATIONS`.
+local SETTINGS_VERSION = 1
 
 ---@type GrimmorySettingsData
 local DEFAULTS = {
@@ -57,7 +62,7 @@ local DEFAULTS = {
     sync_enable_wifi = false,
     sync_periodically = false,
     sync_frequency = 120,
-    sync_shelves = true,
+    download_books = true,
     download_remove_books = false,
     sync_target_shelves = {},
     sync_download_directory = "grimmory/",
@@ -68,6 +73,23 @@ local DEFAULTS = {
     sync_retain_empty_shelves = false,
     device_id = random.uuid(),
     device_name = Device.model,
+    settings_version = SETTINGS_VERSION,
+}
+
+---@type (fun(data: GrimmorySettingsData): nil)[]
+local MIGRATIONS = {
+    -- 1: `sync_shelves` used to hold the "Download Books" switch, which
+    --    read nothing like the "Sync Shelves" setting stored next to it
+    --    in `sync_shelves_as_collections`.
+    function(data)
+        if data.sync_shelves ~= nil then
+            if data.download_books == nil then
+                data.download_books = data.sync_shelves
+            end
+
+            data.sync_shelves = nil
+        end
+    end,
 }
 
 ---@class GrimmorySettings
@@ -79,8 +101,19 @@ local GrimmorySettings = {
 
 local SETTING_KEY = "grimmory"
 
+-- Session state is kept in its own file so it can be written by whichever
+-- process refreshed it without dragging along a stale copy of every other
+-- setting.
+local SESSION_KEY = "grimmory_session"
+local REFRESH_TOKEN_KEY = "refresh_token"
+
 local function openSettingsHandle()
   local path = DataStorage:getSettingsDir() .. "/" .. SETTING_KEY .. ".lua"
+  return LuaSettings:open(path)
+end
+
+local function openSessionHandle()
+  local path = DataStorage:getSettingsDir() .. "/" .. SESSION_KEY .. ".lua"
   return LuaSettings:open(path)
 end
 
@@ -100,11 +133,40 @@ function GrimmorySettings:init()
 
     if success then
         self.data = result
+        self:migrate()
     else
         logger:err("Error reading settings, using defaults", result)
         self.data = DEFAULTS
         self:write()
     end
+end
+
+-- Applies any migration that the stored settings have not seen yet, so
+-- renamed keys keep their value instead of silently reverting.
+function GrimmorySettings:migrate()
+    local version = tonumber(self.data.settings_version) or 0
+
+    if version >= SETTINGS_VERSION then
+        return
+    end
+
+    for index = version + 1, SETTINGS_VERSION do
+        local migration = MIGRATIONS[index]
+
+        if migration ~= nil then
+            local ok, message = pcall(migration, self.data)
+
+            if not ok then
+                logger:err("Failed to migrate settings to version", index, "-", message)
+                return
+            end
+
+            logger:info("Migrated settings to version", index)
+        end
+    end
+
+    self.data.settings_version = SETTINGS_VERSION
+    self:write()
 end
 
 function GrimmorySettings:write()
@@ -153,6 +215,12 @@ end
 
 function GrimmorySettings:setBaseUri(uri)
     uri = tostring(uri or ""):gsub("/*$", "")
+
+    if uri ~= self:getBaseUri() then
+        -- Tokens are only valid for the server that issued them.
+        self:clearRefreshToken()
+    end
+
     self.data.base_uri = uri
     self:write()
 end
@@ -171,6 +239,11 @@ function GrimmorySettings:getUsername()
 end
 
 function GrimmorySettings:setUsername(username)
+    if username ~= self:getUsername() then
+        -- Tokens belong to the user that signed in.
+        self:clearRefreshToken()
+    end
+
     self.data.username = username
     self:write()
 end
@@ -179,9 +252,59 @@ function GrimmorySettings:getPassword()
     return self.data.password or DEFAULTS.password
 end
 
-function GrimmorySettings:setPassword(password)
-    self.data.password = password
+-- The password is only needed to sign in once; afterwards the rotating
+-- refresh token keeps the session alive, so the plaintext copy is
+-- dropped rather than kept on disk.
+function GrimmorySettings:clearPassword()
+    if self:getPassword() == "" then
+        return
+    end
+
+    self.data.password = ""
     self:write()
+end
+
+-- The refresh token deliberately lives outside the settings blob.  Syncs
+-- run in a forked subprocess and Grimmory rotates the token on every
+-- use, so the file has to be the source of truth: a process that cached
+-- the token would otherwise replay one the server has already revoked,
+-- or overwrite a newer one when it saves an unrelated setting.
+function GrimmorySettings:getRefreshToken()
+    local ok, refresh_token = pcall(function()
+        return openSessionHandle():readSetting(REFRESH_TOKEN_KEY)
+    end)
+
+    if not ok then
+        logger:err("Unable to read the stored session", refresh_token)
+        return ""
+    end
+
+    return refresh_token or ""
+end
+
+---@param refresh_token string | nil
+function GrimmorySettings:setRefreshToken(refresh_token)
+    refresh_token = refresh_token or ""
+
+    local ok, message = pcall(function()
+        local session = openSessionHandle()
+
+        if refresh_token == "" then
+            session:delSetting(REFRESH_TOKEN_KEY)
+        else
+            session:saveSetting(REFRESH_TOKEN_KEY, refresh_token)
+        end
+
+        session:flush()
+    end)
+
+    if not ok then
+        logger:err("Unable to store the session", message)
+    end
+end
+
+function GrimmorySettings:clearRefreshToken()
+    self:setRefreshToken("")
 end
 
 function GrimmorySettings:getSessionThresholdSeconds()
@@ -205,15 +328,15 @@ function GrimmorySettings:setSessionThresholdPages(pages)
 end
 
 function GrimmorySettings:getDownloadsBooks()
-    if self.data.sync_shelves == nil then
-        return DEFAULTS.sync_shelves
+    if self.data.download_books == nil then
+        return DEFAULTS.download_books
     end
 
-    return self.data.sync_shelves
+    return self.data.download_books
 end
 
 function GrimmorySettings:toggleDownloadsBooks()
-    self.data.sync_shelves = not self:getDownloadsBooks()
+    self.data.download_books = not self:getDownloadsBooks()
     self:write()
 end
 

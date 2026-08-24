@@ -275,42 +275,131 @@ function GrimmorySynchronize:pushBookAnnotations(book_path, book_grimmory_id)
     local modified_grimmory_annotations = self.doc_metadata:getModifiedGrimmoryAnnotations(book_path)
 
     local is_modified_by_id = {}
+    local has_modifications = false
     for _, modified_id in ipairs(modified_grimmory_annotations) do
         is_modified_by_id[tostring(modified_id)] = true
+        has_modifications = true
+    end
 
-        logger:dbg("Deleting annotation frim Grimmory:", book_path, "-", modified_id)
-        self.api:deleteAnnotation(modified_id)
+    -- Grimmory can only update the colour, style and note of an
+    -- annotation, so the remote copy is needed to tell an edit apart from
+    -- a highlight that moved and has to be recreated.
+    local remote_annotation_by_id = {}
+    if has_modifications then
+        local remote_ok, remote_annotations = self.api:getAnnotations(book_grimmory_id)
 
-        -- Even if the delete fails - which it does today with a 5xx instead of 404 - we
-        -- should continue to remove the annotation and assume it's just gone.
-        --
-        -- Once this bug (grimmory-tools/grimmory#1858) is fixed we can add the check
-        -- back in for the `ok` of `deleteAnnotation` calls.
-        self.doc_metadata:removeModifiedGrimmoryAnnotation(book_path, modified_id)
+        if remote_ok then
+            for _, remote_annotation in ipairs(remote_annotations or {}) do
+                remote_annotation_by_id[tostring(remote_annotation.id)] = remote_annotation
+            end
+        else
+            logger:err("Unable to read annotations before pushing:", book_grimmory_id)
+        end
+    end
+
+    ---@param annotation GrimmoryAnnotation
+    ---@return boolean
+    local function is_moved(annotation)
+        local remote_annotation = remote_annotation_by_id[tostring(annotation.id)]
+
+        if remote_annotation == nil then
+            -- Without the remote copy the safe assumption is that only
+            -- the mutable fields changed.
+            return false
+        end
+
+        return
+            remote_annotation.cfi ~= annotation.cfi or
+            remote_annotation.text ~= annotation.text
+    end
+
+    ---@param annotation GrimmoryAnnotation
+    ---@return boolean created
+    local function create_annotation(annotation)
+        local create_ok, remote_annotation = self.api:createAnnotation(
+            book_grimmory_id,
+            annotation.cfi,
+            annotation.chapter,
+            annotation.text,
+            annotation.color,
+            annotation.style,
+            annotation.note
+        )
+
+        if create_ok then
+            logger:dbg("Created annotation for book:", book_path)
+        else
+            logger:err("Failed to push annotation", remote_annotation)
+        end
+
+        return create_ok
     end
 
     for _, annotation in ipairs(local_annotations) do
-        if annotation.id ~= nil and is_modified_by_id[tostring(annotation.id)] then
-            annotation.id = nil
-        end
+        local annotation_key = annotation.id ~= nil and tostring(annotation.id) or nil
 
-        if annotation.id == nil then
-            -- This is a "new" annotation.
-            local create_ok, remote_annotation = self.api:createAnnotation(
-                book_grimmory_id,
-                annotation.cfi,
-                annotation.chapter,
-                annotation.text,
-                annotation.color,
-                annotation.style,
-                annotation.note
-            )
+        if annotation_key ~= nil and is_modified_by_id[annotation_key] then
+            -- The annotation still exists locally, so it was edited
+            -- rather than removed.
+            if is_moved(annotation) then
+                -- The highlight itself moved, which Grimmory's update
+                -- endpoint cannot express, so it is replaced.  The
+                -- replacement is created first: dropping the old copy
+                -- before the new one exists would lose the highlight
+                -- entirely if the connection died in between.
+                logger:dbg("Replacing moved annotation in Grimmory:", book_path, "-", annotation.id)
 
-            if create_ok then
-                logger:dbg("Created annotation for book:", book_path)
+                if create_annotation(annotation) then
+                    self.api:deleteAnnotation(annotation.id)
+
+                    self.doc_metadata:removeModifiedGrimmoryAnnotation(book_path, annotation.id)
+                else
+                    logger:err(
+                        "Failed to replace moved annotation, retrying on a later sync:",
+                        annotation.id
+                    )
+                end
             else
-                logger:err("Failed to push annotation", remote_annotation)
+                -- Updating in place keeps the Grimmory annotation ID, its
+                -- creation date and any web reader links.
+                logger:dbg("Updating annotation in Grimmory:", book_path, "-", annotation.id)
+
+                local update_ok = self.api:updateAnnotation(
+                    annotation.id,
+                    annotation.color,
+                    annotation.style,
+                    annotation.note
+                )
+
+                if update_ok then
+                    self.doc_metadata:removeModifiedGrimmoryAnnotation(book_path, annotation.id)
+                else
+                    logger:err("Failed to update annotation, retrying on a later sync:", annotation.id)
+                end
             end
+
+            -- Handled, so it is not deleted as a removed annotation below.
+            is_modified_by_id[annotation_key] = nil
+
+        elseif annotation.id == nil then
+            -- This is a "new" annotation.
+            create_annotation(annotation)
+        end
+    end
+
+    -- Anything still flagged as modified no longer exists on the device,
+    -- which means it was removed and should be removed from Grimmory too.
+    for _, modified_id in ipairs(modified_grimmory_annotations) do
+        if is_modified_by_id[tostring(modified_id)] then
+            logger:dbg("Deleting annotation from Grimmory:", book_path, "-", modified_id)
+            self.api:deleteAnnotation(modified_id)
+
+            -- Even if the delete fails - which it does today with a 5xx instead of 404 - we
+            -- should continue to remove the annotation and assume it's just gone.
+            --
+            -- Once this bug (grimmory-tools/grimmory#1858) is fixed we can add the check
+            -- back in for the `ok` of `deleteAnnotation` calls.
+            self.doc_metadata:removeModifiedGrimmoryAnnotation(book_path, modified_id)
         end
     end
 end
@@ -325,12 +414,42 @@ function GrimmorySynchronize:pullBookAnnotations(book_path, book_grimmory_id)
         return
     end
 
+    -- Anything still flagged as modified failed to push, so Grimmory's
+    -- copy is the older one and must not overwrite the device.
+    local pending_grimmory_ids = {}
+    for _, pending_id in ipairs(self.doc_metadata:getModifiedGrimmoryAnnotations(book_path)) do
+        pending_grimmory_ids[tostring(pending_id)] = true
+    end
+
     logger:dbg("Writing annotations to:", book_path)
 
     self.reading_annotations:applyAnnotations(
         book_path,
-        annotations
+        annotations,
+        pending_grimmory_ids
     )
+end
+
+-- Pushes local annotation changes and pulls back whatever Grimmory has,
+-- which is also how annotations created elsewhere reach the device.
+---@param book_path string
+---@param book_grimmory_id integer
+function GrimmorySynchronize:synchronizeBookAnnotations(book_path, book_grimmory_id)
+    if not self.settings:getSyncAnnotations() then
+        logger:dbg("Annotations skipped because feature is disabled for:", book_path)
+        return
+    end
+
+    if book_grimmory_id == nil then
+        logger:dbg("Annotations skipped because book is not associated:", book_path)
+        return
+    end
+
+    logger:info("Pushing book annotations:", book_path)
+    self:pushBookAnnotations(book_path, book_grimmory_id)
+
+    logger:info("Pulling book annotations:", book_path)
+    self:pullBookAnnotations(book_path, book_grimmory_id)
 end
 
 ---@param book_id integer
@@ -338,6 +457,24 @@ end
 function GrimmorySynchronize:pushBookMetadata(book_id, callback)
     self:pushBookProgress(book_id, callback)
     self:pushBookSessions(book_id, callback)
+end
+
+-- Annotations live in the sidecar rather than the local database, so the
+-- book has to be resolved back to its path before they can be synced.
+---@param book_id integer
+function GrimmorySynchronize:synchronizeBookAnnotationsById(book_id)
+    if not self.settings:getSyncAnnotations() then
+        return
+    end
+
+    local book_ok, book = self.repository:findBookById(book_id)
+
+    if not book_ok or book == nil then
+        logger:err("Unable to look up book for annotation sync:", book_id)
+        return
+    end
+
+    self:synchronizeBookAnnotations(book.book_path, book.grimmory_id)
 end
 
 function GrimmorySynchronize:pushAllPendingBookMetadata(callback)
@@ -352,6 +489,7 @@ function GrimmorySynchronize:pushAllPendingBookMetadata(callback)
         end
 
         pcall(self.pushBookMetadata, self, book_id, callback)
+        pcall(self.synchronizeBookAnnotationsById, self, book_id)
 
         callback({
             state = "push-book-metadata",
@@ -1047,14 +1185,8 @@ function GrimmorySynchronize:synchronizeBook(book_path, refresh_book, callback)
         end
     end
 
-    -- Pull annotations from Grimmory
-    if grimmory_id then
-        logger:info("Pushing book annotations:", book_path)
-        self:pushBookAnnotations(book_path, grimmory_id)
-
-        logger:info("Pulling book annotations:", book_path)
-        self:pullBookAnnotations(book_path, grimmory_id)
-    end
+    -- Push local annotation changes and pull back anything new
+    self:synchronizeBookAnnotations(book_path, grimmory_id)
 
     -- First, tell Grimmory about all of our reading
     logger:info("Pushing pending book metadata:", book_path)
