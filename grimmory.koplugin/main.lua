@@ -21,6 +21,7 @@ local GrimmoryMenu = require("grimmory/ui/menu")
 local GrimmorySettings = require("grimmory/settings")
 local GrimmoryAPI = require("grimmory/grimmory_api")
 local GrimmorySynchronize = require("grimmory/synchronize")
+local GrimmoryUpload = require("grimmory/upload")
 local GrimmoryScheduler = require("grimmory/scheduler")
 local GrimmorySelfUpdater = require("grimmory/ota/self_updater")
 local GithubAPI = require("grimmory/ota/github_api")
@@ -131,6 +132,12 @@ function Grimmory:init()
         updater = self.updater,
     })
 
+    self.upload = GrimmoryUpload:new({
+        settings = self.settings,
+        api = self.api,
+        doc_metadata = self.doc_metadata,
+    })
+
     self.synchronizer = GrimmorySynchronize:new({
         settings = self.settings,
         repository = self.repository,
@@ -138,6 +145,7 @@ function Grimmory:init()
         doc_metadata = self.doc_metadata,
         reading_progress_manager = self.reading_progress_manager,
         reading_annotations = self.reading_annotations,
+        upload = self.upload,
     })
 
     self.executor = GrimmoryExecutor:new()
@@ -479,6 +487,8 @@ function Grimmory:onGrimmorySync(verbose, book_path, refresh_book)
         local book_download_count = 0
         local book_refresh_count = 0
         local book_error_count = 0
+        local book_upload_count = 0
+        local book_upload_error_count = 0
 
         local update_progress_step = function(progress_step)
             if progress_step <= last_progress_step then
@@ -564,6 +574,10 @@ function Grimmory:onGrimmorySync(verbose, book_path, refresh_book)
 
                 elseif progress.state == "book-error" then
                     book_error_count = book_error_count + 1
+                elseif progress.state == "book-uploaded" then
+                    book_upload_count = book_upload_count + 1
+                elseif progress.state == "book-upload-error" then
+                    book_upload_error_count = book_upload_error_count + 1
                 elseif progress.state == "book-pull-metadata" then
                     book_refresh_count = book_refresh_count + 1
                 end
@@ -647,8 +661,16 @@ function Grimmory:onGrimmorySync(verbose, book_path, refresh_book)
                 table.insert(message, T(_("%1 book(s) refreshed"), book_refresh_count))
             end
 
+            if book_upload_count > 0 then
+                table.insert(message, T(_("%1 book(s) uploaded"), book_upload_count))
+            end
+
             if book_error_count > 0 then
                 table.insert(message, T(_("%1 book(s) failed"), book_error_count))
+            end
+
+            if book_upload_error_count > 0 then
+                table.insert(message, T(_("%1 book(s) failed to upload"), book_upload_error_count))
             end
 
             self.dialog_manager:toast(table.concat(message, "\n"))

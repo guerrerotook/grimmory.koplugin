@@ -263,6 +263,70 @@ function GrimmoryMenu:getDownloadOptionsMenu()
     }
 end
 
+function GrimmoryMenu:getUploadOptionsMenu()
+    return {
+        {
+            text_func = function()
+                local directory = self.settings:getUploadDirectory()
+
+                if directory == "" then
+                    return _("Upload Folder: Not Set")
+                end
+
+                return T(_("Upload Folder: %1"), directory)
+            end,
+            callback = function()
+                self.dialog_manager:showUploadDirectorySettings()
+            end,
+        },
+        {
+            text_func = function()
+                local library = self.settings:getUploadLibrary()
+
+                if library == nil then
+                    return _("Target Library: Not Set")
+                end
+
+                return T(_("Target Library: %1"), library.name)
+            end,
+            enabled_func = function()
+                return self.settings:getBaseUri() ~= ""
+            end,
+            callback = function()
+                self.dialog_manager:showUploadLibrarySettings()
+            end,
+        },
+        {
+            text_func = function()
+                local shelf = self.settings:getUploadTargetShelf()
+
+                if shelf == nil then
+                    return _("Target Shelf: None")
+                end
+
+                return T(_("Target Shelf: %1"), shelf.name)
+            end,
+            enabled_func = function()
+                return self.settings:getBaseUri() ~= ""
+            end,
+            callback = function()
+                self.dialog_manager:showUploadShelfSettings()
+            end,
+            separator = true,
+        },
+        {
+            text = _("Delete Local Copy After Upload"),
+            checked_func = function()
+                return self.settings:getUploadRemoveBooks()
+            end,
+            callback = function()
+                self.settings:toggleUploadRemoveBooks()
+                UIManager:broadcastEvent(Event:new("GrimmorySettingsChanged"))
+            end,
+        },
+    }
+end
+
 function GrimmoryMenu:getTopMenu()
     local menu = {
         {
@@ -293,6 +357,21 @@ function GrimmoryMenu:getTopMenu()
         {
             text = _("Download Configuration"),
             sub_item_table = self:getDownloadOptionsMenu(),
+            separator = true,
+        },
+        {
+            text = _("Upload Books"),
+            checked_func = function()
+                return self.settings:getUploadBooks()
+            end,
+            callback = function()
+                self.settings:toggleUploadBooks()
+                UIManager:broadcastEvent(Event:new("GrimmorySettingsChanged"))
+            end,
+        },
+        {
+            text = _("Upload Configuration"),
+            sub_item_table = self:getUploadOptionsMenu(),
             separator = true,
         },
         {

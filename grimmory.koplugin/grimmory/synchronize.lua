@@ -22,6 +22,7 @@ end
 ---@field settings GrimmorySettings
 ---@field api GrimmoryAPI
 ---@field doc_metadata GrimmoryDocMetadata
+---@field upload GrimmoryUpload | nil
 local GrimmorySynchronize = {}
 
 function GrimmorySynchronize:new(o)
@@ -1085,6 +1086,14 @@ function GrimmorySynchronize:synchronizeAll(callback)
     -- First, tell Grimmory about all of our reading
     logger:info("Pushing pending book metadata")
     self:pushAllPendingBookMetadata(callback)
+
+    -- Send anything waiting in the upload folder before the shelves are
+    -- read, so a freshly uploaded book can be shelved and pulled back in
+    -- the same sync.
+    if self.upload ~= nil then
+        logger:info("Uploading books")
+        self.upload:uploadBooks(callback)
+    end
 
     -- Then pull the shelves
     logger:info("Synchronizing shelves")

@@ -16,6 +16,12 @@ local logger = GrimmoryLogger:new()
 ---@field id number
 ---@field name string
 
+---@class GrimmoryUploadLibrary
+---@field id number
+---@field name string
+---@field path_id number
+---@field path string
+
 ---@class GrimmorySettingsData
 ---@field automatic_check_updates boolean
 ---@field base_uri string
@@ -34,6 +40,11 @@ local logger = GrimmoryLogger:new()
 ---@field download_remove_books boolean
 ---@field sync_target_shelves GrimmoryTargetShelf[]
 ---@field sync_download_directory string
+---@field upload_books boolean
+---@field upload_directory string
+---@field upload_library GrimmoryUploadLibrary | nil
+---@field upload_target_shelf GrimmoryTargetShelf | nil
+---@field upload_remove_books boolean
 ---@field sync_reading_sessions boolean
 ---@field sync_reading_progress boolean
 ---@field sync_annotations boolean
@@ -66,6 +77,11 @@ local DEFAULTS = {
     download_remove_books = false,
     sync_target_shelves = {},
     sync_download_directory = "grimmory/",
+    upload_books = false,
+    upload_directory = "",
+    upload_library = nil,
+    upload_target_shelf = nil,
+    upload_remove_books = true,
     sync_reading_sessions = true,
     sync_reading_progress = true,
     sync_annotations = true,
@@ -370,6 +386,64 @@ end
 ---@param target_shelves GrimmoryTargetShelf[]
 function GrimmorySettings:setDownloadTargetShelves(target_shelves)
     self.data.sync_target_shelves = target_shelves
+    self:write()
+end
+
+function GrimmorySettings:getUploadBooks()
+    if self.data.upload_books == nil then
+        return DEFAULTS.upload_books
+    end
+
+    return self.data.upload_books
+end
+
+function GrimmorySettings:toggleUploadBooks()
+    self.data.upload_books = not self:getUploadBooks()
+    self:write()
+end
+
+function GrimmorySettings:getUploadDirectory()
+    return self.data.upload_directory or DEFAULTS.upload_directory
+end
+
+---@param directory string
+function GrimmorySettings:setUploadDirectory(directory)
+    self.data.upload_directory = directory
+    self:write()
+end
+
+---@return GrimmoryUploadLibrary | nil
+function GrimmorySettings:getUploadLibrary()
+    return self.data.upload_library
+end
+
+---@param library GrimmoryUploadLibrary | nil
+function GrimmorySettings:setUploadLibrary(library)
+    self.data.upload_library = library
+    self:write()
+end
+
+---@return GrimmoryTargetShelf | nil
+function GrimmorySettings:getUploadTargetShelf()
+    return self.data.upload_target_shelf
+end
+
+---@param target_shelf GrimmoryTargetShelf | nil
+function GrimmorySettings:setUploadTargetShelf(target_shelf)
+    self.data.upload_target_shelf = target_shelf
+    self:write()
+end
+
+function GrimmorySettings:getUploadRemoveBooks()
+    if self.data.upload_remove_books == nil then
+        return DEFAULTS.upload_remove_books
+    end
+
+    return self.data.upload_remove_books
+end
+
+function GrimmorySettings:toggleUploadRemoveBooks()
+    self.data.upload_remove_books = not self:getUploadRemoveBooks()
     self:write()
 end
 
