@@ -29,20 +29,36 @@ package.preload["datastorage"] = function()
 end
 
 local stored_settings = {}
+local stored_session = {}
+
+-- The refresh token is kept in its own file, so the stub has to keep the
+-- two apart the way LuaSettings does.
+local function store_for(path)
+    if tostring(path):match("grimmory_session") then
+        return stored_session
+    end
+
+    return stored_settings
+end
 
 package.preload["luasettings"] = function()
     return {
-        open = function()
+        open = function(_, path)
+            local store = store_for(path)
+
             return {
                 readSetting = function(_, key, default)
-                    if stored_settings[key] == nil then
+                    if store[key] == nil then
                         return default
                     end
 
-                    return stored_settings[key]
+                    return store[key]
                 end,
                 saveSetting = function(_, key, value)
-                    stored_settings[key] = value
+                    store[key] = value
+                end,
+                delSetting = function(_, key)
+                    store[key] = nil
                 end,
                 flush = function() end,
             }
@@ -67,6 +83,7 @@ local GrimmorySettings = require("grimmory/settings")
 ---@return GrimmorySettings
 local function make_settings(data)
     stored_settings = { grimmory = data }
+    stored_session = {}
 
     return GrimmorySettings:new()
 end

@@ -402,11 +402,19 @@ function GrimmorySynchronize:pullBookAnnotations(book_path, book_grimmory_id)
         return
     end
 
+    -- Anything still flagged as modified failed to push, so Grimmory's
+    -- copy is the older one and must not overwrite the device.
+    local pending_grimmory_ids = {}
+    for _, pending_id in ipairs(self.doc_metadata:getModifiedGrimmoryAnnotations(book_path)) do
+        pending_grimmory_ids[tostring(pending_id)] = true
+    end
+
     logger:dbg("Writing annotations to:", book_path)
 
     self.reading_annotations:applyAnnotations(
         book_path,
-        annotations
+        annotations,
+        pending_grimmory_ids
     )
 end
 

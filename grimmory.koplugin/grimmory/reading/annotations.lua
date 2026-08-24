@@ -155,7 +155,9 @@ local function is_same_xpointer(a, b)
 end
 
 ---@param book_path string
-local function merge_annotations(local_annotations, remote_annotations)
+local function merge_annotations(local_annotations, remote_annotations, pending_grimmory_ids)
+    pending_grimmory_ids = pending_grimmory_ids or {}
+
     local remote_grimmory_ids = {}
     for _, a in ipairs(remote_annotations) do
         if a.grimmory_id ~= nil then
@@ -212,16 +214,23 @@ local function merge_annotations(local_annotations, remote_annotations)
             -- Apply to matching grimmory ID
             local existing_annotation = local_grimmory_ids[grimmory_id]
 
-            existing_annotation.pos0 = annotation.pos0
-            existing_annotation.pos1 = annotation.pos1
-            existing_annotation.datetime = annotation.datetime
-            existing_annotation.datetime_updated = annotation.datetime_updated
-            existing_annotation.color = annotation.color
-            existing_annotation.drawer = annotation.drawer
-            existing_annotation.chapter = annotation.chapter
-            existing_annotation.text = annotation.text
-            existing_annotation.page = annotation.page
-            existing_annotation.note = annotation.note
+            if pending_grimmory_ids[grimmory_id] then
+                -- A local edit to this annotation has not reached
+                -- Grimmory yet, so the remote copy is the stale one and
+                -- would undo the reader's change.
+                existing_annotation.grimmory_id = annotation.grimmory_id
+            else
+                existing_annotation.pos0 = annotation.pos0
+                existing_annotation.pos1 = annotation.pos1
+                existing_annotation.datetime = annotation.datetime
+                existing_annotation.datetime_updated = annotation.datetime_updated
+                existing_annotation.color = annotation.color
+                existing_annotation.drawer = annotation.drawer
+                existing_annotation.chapter = annotation.chapter
+                existing_annotation.text = annotation.text
+                existing_annotation.page = annotation.page
+                existing_annotation.note = annotation.note
+            end
         end
     end
 
@@ -234,8 +243,9 @@ local function merge_annotations(local_annotations, remote_annotations)
 end
 
 ---@param book_path string
----@param annotations GrimmoryAnnotation[]
-function GrimmoryReadingAnnotations:applyAnnotations(book_path, grimmory_annotations)
+---@param grimmory_annotations GrimmoryAnnotation[]
+---@param pending_grimmory_ids table<string, boolean> | nil annotations whose local changes have not been pushed yet
+function GrimmoryReadingAnnotations:applyAnnotations(book_path, grimmory_annotations, pending_grimmory_ids)
     local remote_annotations = {}
 
     with_cfi_resolver(
@@ -272,7 +282,11 @@ function GrimmoryReadingAnnotations:applyAnnotations(book_path, grimmory_annotat
 
     local local_annotations = self.doc_metadata:getAnnotations(book_path)
 
-    local new_annotations = merge_annotations(local_annotations, remote_annotations)
+    local new_annotations = merge_annotations(
+        local_annotations,
+        remote_annotations,
+        pending_grimmory_ids
+    )
 
     self.doc_metadata:setAnnotations(book_path, new_annotations)
 end

@@ -194,14 +194,9 @@ end
 function GrimmoryAPI:init()
     -- TODO: Watch base URI / username / password fields to reset access token
 
-    -- Reusing the stored refresh token keeps the plugin signed in across
-    -- restarts, so the password does not have to be kept on disk.
-    local refresh_token = self.settings:getRefreshToken()
-
-    if refresh_token ~= nil and refresh_token ~= "" then
-        self.cached_refresh_token = refresh_token
-        self.cached_token_expiry = 0
-    end
+    self.cached_access_token = nil
+    self.cached_refresh_token = nil
+    self.cached_token_expiry = 0
 
     self.requires_sign_in = false
 end
@@ -214,10 +209,6 @@ function GrimmoryAPI:onSignedIn(refresh_token)
     self.requires_sign_in = false
 
     self.settings:setRefreshToken(refresh_token)
-
-    -- The session now lives in the refresh token, so the plaintext
-    -- password is no longer needed.
-    self.settings:clearPassword()
 end
 
 function GrimmoryAPI:onSignedOut()
@@ -228,12 +219,43 @@ function GrimmoryAPI:onSignedOut()
     self.settings:clearRefreshToken()
 end
 
+-- Syncs run in a forked subprocess, so the token this process cached may
+-- already have been rotated and revoked by another one.  The stored copy
+-- is therefore preferred whenever a new access token is needed.
+function GrimmoryAPI:reloadStoredSession()
+    local refresh_token = self.settings:getRefreshToken()
+
+    if refresh_token ~= "" then
+        self.cached_refresh_token = refresh_token
+    end
+end
+
+-- Whether syncing is blocked until the user signs in again, which the
+-- stored credentials answer even when the failure happened in another
+-- process.
+---@return boolean
+function GrimmoryAPI:requiresSignIn()
+    if self.requires_sign_in then
+        return true
+    end
+
+    return
+        self.settings:getRefreshToken() == "" and
+        self.settings:getPassword() == ""
+end
+
 function GrimmoryAPI:getUri(path)
     local base_uri = self.settings:getBaseUri():gsub("/+$", "")
 
     return base_uri .. path
 end
 
+---@param refresh_token string
+---@return boolean ok
+---@return string | nil access_token
+---@return string | nil refresh_token
+---@return number expiry
+---@return number code
 function GrimmoryAPI:refreshToken(refresh_token)
     local uri = self:getUri("/api/v1/auth/refresh")
 
@@ -241,17 +263,17 @@ function GrimmoryAPI:refreshToken(refresh_token)
         refreshToken = refresh_token,
     }
 
-    local ok, _, body = self:rawRequest("POST", uri, credentials)
+    local ok, code, body = self:rawRequest("POST", uri, credentials)
 
     if not ok or not body then
-        return false, nil, nil, 0
+        return false, nil, nil, 0, tonumber(code) or 0
     end
 
     local access_token = from_json_string(body["accessToken"])
     local new_refresh_token = from_json_string(body["refreshToken"])
     local expires = from_json_number(body["expires"])
 
-    return ok, access_token, new_refresh_token, expires
+    return ok, access_token, new_refresh_token, expires, tonumber(code) or 0
 end
 
 ---@param base_uri string
@@ -368,10 +390,16 @@ function GrimmoryAPI:request(method, path, data, headers, sink)
 
     local uri = self:getUri(path)
 
+    if self.cached_token_expiry <= os.time() then
+        -- A new access token is about to be needed, so pick up any token
+        -- that another process rotated in the meantime.
+        self:reloadStoredSession()
+    end
+
     if self.cached_refresh_token ~= nil and self.cached_token_expiry <= os.time() then
         -- If token exists but is expired, try to refresh
 
-        local refresk_token_ok, access_token, refresh_token, expiration = self:refreshToken(
+        local refresk_token_ok, access_token, refresh_token, expiration, code = self:refreshToken(
             self.cached_refresh_token
         )
 
@@ -381,11 +409,17 @@ function GrimmoryAPI:request(method, path, data, headers, sink)
             self.cached_access_token = access_token
 
             self:onSignedIn(refresh_token)
-        else
-            -- We're expired and can't refresh.  Toss out the cached
-            -- token data and let the block below do its deal.
+        elseif code == 401 or code == 403 then
+            -- The token really is gone; fall through and try to sign in
+            -- again with whatever credentials are left.
             logger:warn("Refresh token was rejected, signing out")
             self:onSignedOut()
+        else
+            -- A timeout, a proxy error or an unreachable server says
+            -- nothing about the token, so it is kept for the next try.
+            logger:err("Unable to refresh the access token, code:", code)
+
+            return false, code, "Could not refresh access token"
         end
     end
 
@@ -397,9 +431,11 @@ function GrimmoryAPI:request(method, path, data, headers, sink)
         )
 
         if not access_token_ok or not access_token or not refresh_token then
-            -- Without a password there is nothing left to try, so the
-            -- user has to sign in again from the connection settings.
-            self.requires_sign_in = true
+            -- Without a usable password there is nothing left to try, so
+            -- the user has to sign in from the connection settings.
+            if self.settings:getPassword() == "" then
+                self.requires_sign_in = true
+            end
 
             return false, 0, "Could not get access token"
         end
@@ -455,11 +491,35 @@ function GrimmoryAPI:signIn(username, password)
 
     self:onSignedIn(refresh_token)
 
+    -- The session now lives in the refresh token, so a password left over
+    -- from an older version of the plugin can go.  This only happens here,
+    -- in the foreground, because a sync runs in a subprocess whose copy of
+    -- the settings would take the rest of the file back in time with it.
+    self.settings:clearPassword()
+
     return true, nil
 end
 
 function GrimmoryAPI:testConnection(base_uri, username, password)
     base_uri = base_uri:gsub("/+$", "")
+
+    if password == nil or password == "" then
+        -- Nothing was typed, so the stored session is what gets tested.
+        -- It was issued for one server and user, and says nothing about
+        -- any other.
+        if
+            base_uri ~= self.settings:getBaseUri() or
+            username ~= self.settings:getUsername()
+        then
+            return false, _("Enter a password to test a different server or user")
+        end
+
+        if self:requiresSignIn() then
+            return false, _("Enter a password to sign in")
+        end
+
+        return self:getServerVersion()
+    end
 
     local access_token_ok, access_token = self:getToken(
         base_uri,

@@ -97,8 +97,7 @@ end
 
 ---@param count number
 ---@param matching_index number | nil
-local function make_sessions(count, matching_index)
-    local sessions = {}
+local function make_sessions(count, matching_index)    local sessions = {}
 
     for index = 1, count do
         local matches = index == matching_index
@@ -211,5 +210,180 @@ describe("GrimmoryAPI", function()
             assert.is_false(found)
             assert.are.equal(100, #api.requests)
         end)
+    end)
+end)
+
+-- Settings double that behaves like the real one: the refresh token is a
+-- file, so it survives a process that never learned about a rotation.
+local function make_settings(stored)
+    stored = stored or {}
+
+    return {
+        refresh_token = stored.refresh_token or "",
+        password = stored.password or "",
+        base_uri = stored.base_uri or "https://grimmory.example",
+        username = stored.username or "reader",
+        extra_headers = {},
+
+        getRefreshToken = function(self) return self.refresh_token end,
+        setRefreshToken = function(self, token) self.refresh_token = token or "" end,
+        clearRefreshToken = function(self) self.refresh_token = "" end,
+        getPassword = function(self) return self.password end,
+        clearPassword = function(self) self.password = "" end,
+        getBaseUri = function(self) return self.base_uri end,
+        getUsername = function(self) return self.username end,
+        getExtraHeaders = function(self) return self.extra_headers end,
+    }
+end
+
+---@param settings table
+---@param responses table
+local function make_auth_api(settings, responses)
+    local api = GrimmoryAPI:new({ settings = settings })
+
+    api.calls = {}
+
+    api.rawRequest = function(self, method, uri, ...)
+        table.insert(self.calls, uri)
+
+        for pattern, response in pairs(responses) do
+            if uri:match(pattern) then
+                if type(response) == "function" then
+                    return response(self, method, uri, ...)
+                end
+
+                return response[1], response[2], response[3]
+            end
+        end
+
+        return true, 200, {}
+    end
+
+    return api
+end
+
+describe("GrimmoryAPI auth", function()
+    it("keeps the stored token when the refresh fails for transport reasons", function()
+        local settings = make_settings({ refresh_token = "stored-token" })
+
+        local api = make_auth_api(settings, {
+            ["/auth/refresh"] = { false, 0, "timeout" },
+        })
+
+        local ok = api:request("GET", "/api/v1/version")
+
+        assert.is_false(ok)
+        assert.are.equal("stored-token", settings.refresh_token)
+        assert.is_false(api.requires_sign_in)
+    end)
+
+    it("keeps the stored token when the server is broken", function()
+        local settings = make_settings({ refresh_token = "stored-token" })
+
+        local api = make_auth_api(settings, {
+            ["/auth/refresh"] = { false, 502, "bad gateway" },
+        })
+
+        api:request("GET", "/api/v1/version")
+
+        assert.are.equal("stored-token", settings.refresh_token)
+    end)
+
+    it("signs out when the refresh token is actually rejected", function()
+        local settings = make_settings({ refresh_token = "stored-token" })
+
+        local api = make_auth_api(settings, {
+            ["/auth/refresh"] = { false, 401, "unauthorized" },
+            ["/auth/login"] = { false, 401, "unauthorized" },
+        })
+
+        api:request("GET", "/api/v1/version")
+
+        assert.are.equal("", settings.refresh_token)
+        assert.is_true(api.requires_sign_in)
+    end)
+
+    it("stores the rotated token on every refresh", function()
+        local settings = make_settings({ refresh_token = "stored-token" })
+
+        local api = make_auth_api(settings, {
+            ["/auth/refresh"] = {
+                true,
+                200,
+                { accessToken = "access", refreshToken = "rotated", expires = 7200 },
+            },
+        })
+
+        api:request("GET", "/api/v1/version")
+
+        assert.are.equal("rotated", settings.refresh_token)
+    end)
+
+    it("prefers the stored token over the one it cached before a fork", function()
+        local settings = make_settings({ refresh_token = "stored-token" })
+
+        local api = make_auth_api(settings, {
+            ["/auth/refresh"] = function(_, _, _, data)
+                if data.refreshToken ~= "rotated-elsewhere" then
+                    return false, 401, "unauthorized"
+                end
+
+                return true, 200, { accessToken = "access", refreshToken = "newer", expires = 7200 }
+            end,
+        })
+
+        -- Another process rotated the token after this one cached it.
+        api.cached_refresh_token = "stale-token"
+        settings.refresh_token = "rotated-elsewhere"
+
+        local ok = api:request("GET", "/api/v1/version")
+
+        assert.is_true(ok)
+        assert.are.equal("newer", settings.refresh_token)
+    end)
+
+    it("reports that a sign in is needed when no credentials are left", function()
+        local api = make_auth_api(make_settings(), {})
+
+        assert.is_true(api:requiresSignIn())
+    end)
+
+    it("does not ask for a sign in while a token is stored", function()
+        local api = make_auth_api(make_settings({ refresh_token = "stored-token" }), {})
+
+        assert.is_false(api:requiresSignIn())
+    end)
+
+    it("does not ask for a sign in while a password is stored", function()
+        local api = make_auth_api(make_settings({ password = "hunter2" }), {})
+
+        assert.is_false(api:requiresSignIn())
+    end)
+
+    it("tests the stored session when no password is typed", function()
+        local settings = make_settings({ refresh_token = "stored-token" })
+
+        local api = make_auth_api(settings, {
+            ["/auth/refresh"] = {
+                true,
+                200,
+                { accessToken = "access", refreshToken = "rotated", expires = 7200 },
+            },
+            ["/api/v1/version"] = { true, 200, { current = "1.2.3" } },
+        })
+
+        local ok, version = api:testConnection("https://grimmory.example", "reader", "")
+
+        assert.is_true(ok)
+        assert.are.equal("1.2.3", version)
+    end)
+
+    it("asks for a password before testing a different server", function()
+        local api = make_auth_api(make_settings({ refresh_token = "stored-token" }), {})
+
+        local ok = api:testConnection("https://other.example", "reader", "")
+
+        assert.is_false(ok)
+        assert.are.equal(0, #api.calls)
     end)
 end)

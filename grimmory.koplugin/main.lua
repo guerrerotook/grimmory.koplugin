@@ -590,7 +590,7 @@ function Grimmory:onGrimmorySync(verbose, book_path, refresh_book)
                 logger:err("Failed sync", result)
 
                 if verbose then
-                    if self.api.requires_sign_in then
+                    if self.api:requiresSignIn() then
                         self.dialog_manager:toast(
                             _("Failed to Synchronize with Grimmory: Sign in again from Connection Settings")
                         )

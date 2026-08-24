@@ -21,7 +21,6 @@ local logger = GrimmoryLogger:new()
 ---@field base_uri string
 ---@field username string
 ---@field password string
----@field refresh_token string
 ---@field extra_headers { [string]: string }
 ---@field session_threshold_seconds number
 ---@field session_threshold_pages number
@@ -55,7 +54,6 @@ local DEFAULTS = {
     base_uri = "",
     username = "",
     password = "",
-    refresh_token = "",
     session_threshold_seconds = 30,
     session_threshold_pages = 0,
     sync_on_close_document = false,
@@ -103,8 +101,19 @@ local GrimmorySettings = {
 
 local SETTING_KEY = "grimmory"
 
+-- Session state is kept in its own file so it can be written by whichever
+-- process refreshed it without dragging along a stale copy of every other
+-- setting.
+local SESSION_KEY = "grimmory_session"
+local REFRESH_TOKEN_KEY = "refresh_token"
+
 local function openSettingsHandle()
   local path = DataStorage:getSettingsDir() .. "/" .. SETTING_KEY .. ".lua"
+  return LuaSettings:open(path)
+end
+
+local function openSessionHandle()
+  local path = DataStorage:getSettingsDir() .. "/" .. SESSION_KEY .. ".lua"
   return LuaSettings:open(path)
 end
 
@@ -255,20 +264,43 @@ function GrimmorySettings:clearPassword()
     self:write()
 end
 
+-- The refresh token deliberately lives outside the settings blob.  Syncs
+-- run in a forked subprocess and Grimmory rotates the token on every
+-- use, so the file has to be the source of truth: a process that cached
+-- the token would otherwise replay one the server has already revoked,
+-- or overwrite a newer one when it saves an unrelated setting.
 function GrimmorySettings:getRefreshToken()
-    return self.data.refresh_token or DEFAULTS.refresh_token
+    local ok, refresh_token = pcall(function()
+        return openSessionHandle():readSetting(REFRESH_TOKEN_KEY)
+    end)
+
+    if not ok then
+        logger:err("Unable to read the stored session", refresh_token)
+        return ""
+    end
+
+    return refresh_token or ""
 end
 
 ---@param refresh_token string | nil
 function GrimmorySettings:setRefreshToken(refresh_token)
     refresh_token = refresh_token or ""
 
-    if refresh_token == self:getRefreshToken() then
-        return
-    end
+    local ok, message = pcall(function()
+        local session = openSessionHandle()
 
-    self.data.refresh_token = refresh_token
-    self:write()
+        if refresh_token == "" then
+            session:delSetting(REFRESH_TOKEN_KEY)
+        else
+            session:saveSetting(REFRESH_TOKEN_KEY, refresh_token)
+        end
+
+        session:flush()
+    end)
+
+    if not ok then
+        logger:err("Unable to store the session", message)
+    end
 end
 
 function GrimmorySettings:clearRefreshToken()
