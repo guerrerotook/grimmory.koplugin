@@ -53,6 +53,27 @@ describe("GrimmoryDateTime", function()
             assert.is_nil(GrimmoryDateTime.fromUTC({ year = 2024, month = 3 }))
             assert.is_nil(GrimmoryDateTime.fromUTC({}))
         end)
+
+        it("stays exact around daylight saving changes", function()
+            -- Absolute instants, so these hold in any device timezone.
+            local instants = {
+                1710046800, -- an hour before the US spring forward
+                1710050400,
+                1710054000, -- the US spring forward
+                1730610000, -- an hour before the US fall back
+                1730613600, -- the US fall back
+                1711846800, -- the EU spring forward
+                1729984800, -- the EU fall back
+            }
+
+            for _, instant in ipairs(instants) do
+                assert.are.equal(
+                    instant,
+                    GrimmoryDateTime.fromUTC(os.date("!*t", instant)),
+                    "failed for " .. os.date("!%Y-%m-%dT%H:%M:%SZ", instant)
+                )
+            end
+        end)
     end)
 
     describe("fromLocal", function()

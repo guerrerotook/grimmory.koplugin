@@ -1,10 +1,12 @@
 -- Timestamp helpers shared by the Grimmory API and the KOReader sidecar.
 --
 -- `os.time` always interprets the table it is given as *local* time, so
--- calendar fields that are known to be UTC have to be corrected by the
--- device's offset from UTC or every inbound timestamp ends up skewed.
+-- calendar fields that are known to be UTC cannot be handed to it or
+-- every inbound timestamp ends up skewed by the device's offset.
 
 local GrimmoryDateTime = {}
+
+local SECONDS_PER_DAY = 86400
 
 ---@param fields table
 ---@return table
@@ -31,20 +33,29 @@ local function is_complete(fields)
         fields.sec ~= nil
 end
 
--- The device's offset from UTC, in seconds, at a given instant.  The UTC
--- calendar fields of `reference` are fed back through `os.time`, which
--- reads them as local time, so the difference between the two is the
--- offset that was applied.
----@param reference number
----@return number offset_seconds
-local function utc_offset(reference)
-    local utc_fields = os.date("!*t", reference)
+-- Days between a civil date and 1970-01-01, using Howard Hinnant's
+-- calendar algorithm.  Doing the arithmetic here keeps the conversion
+-- away from the device's timezone, which `os.time` cannot be told to
+-- ignore and which is ambiguous during a daylight saving change.
+---@param year number
+---@param month number
+---@param day number
+---@return number days
+local function days_from_civil(year, month, day)
+    -- March is treated as the first month of the year so that a leap day
+    -- lands at the end of it.
+    year = month <= 2 and year - 1 or year
 
-    -- Keep the daylight saving flag of the local zone so the offset
-    -- stays correct during summer time.
-    utc_fields.isdst = os.date("*t", reference).isdst
+    local era = math.floor(year / 400)
+    local year_of_era = year - era * 400
+    local day_of_year = math.floor((153 * (month + (month > 2 and -3 or 9)) + 2) / 5) + day - 1
+    local day_of_era =
+        year_of_era * 365 +
+        math.floor(year_of_era / 4) -
+        math.floor(year_of_era / 100) +
+        day_of_year
 
-    return os.difftime(reference, os.time(utc_fields))
+    return era * 146097 + day_of_era - 719468
 end
 
 -- Converts calendar fields that represent UTC into a timestamp.
@@ -57,15 +68,13 @@ function GrimmoryDateTime.fromUTC(fields)
         return nil
     end
 
-    -- `os.time` reads these UTC fields as local time, which lands us the
-    -- offset away from the real instant.
-    local local_timestamp = os.time(fields)
+    local days = days_from_civil(fields.year, fields.month, fields.day)
 
-    if local_timestamp == nil then
-        return nil
-    end
-
-    return local_timestamp + utc_offset(local_timestamp)
+    return
+        days * SECONDS_PER_DAY +
+        fields.hour * 3600 +
+        fields.min * 60 +
+        fields.sec
 end
 
 -- Converts calendar fields that represent local time into a timestamp.
