@@ -5,6 +5,7 @@ local json = require("json")
 local ltn12 = require("ltn12")
 
 local PluginMetadata = require("grimmory/plugin_metadata")
+local GrimmoryDateTime = require("grimmory/datetime")
 local GrimmoryLogger = require("grimmory/logger")
 
 local logger = GrimmoryLogger:new()
@@ -60,7 +61,9 @@ local function from_iso8601(value)
         "(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)"
     )
 
-    return os.time({
+    -- Grimmory sends UTC, so the fields cannot be handed to `os.time`
+    -- without correcting for the device's offset.
+    return GrimmoryDateTime.fromUTC({
         year = year,
         month = month,
         day = day,
@@ -174,6 +177,7 @@ end
 
 ---@class GrimmoryAPI
 ---@field settings GrimmorySettings
+---@field requires_sign_in boolean
 ---@field private cached_access_token string
 ---@field private cached_refresh_token string
 ---@field private cached_token_expiry number
@@ -190,6 +194,38 @@ end
 function GrimmoryAPI:init()
     -- TODO: Watch base URI / username / password fields to reset access token
 
+    -- Reusing the stored refresh token keeps the plugin signed in across
+    -- restarts, so the password does not have to be kept on disk.
+    local refresh_token = self.settings:getRefreshToken()
+
+    if refresh_token ~= nil and refresh_token ~= "" then
+        self.cached_refresh_token = refresh_token
+        self.cached_token_expiry = 0
+    end
+
+    self.requires_sign_in = false
+end
+
+-- Grimmory rotates the refresh token on every use and revokes the
+-- previous one, so the new token has to replace the stored copy right
+-- away or the session is lost.
+---@param refresh_token string | nil
+function GrimmoryAPI:onSignedIn(refresh_token)
+    self.requires_sign_in = false
+
+    self.settings:setRefreshToken(refresh_token)
+
+    -- The session now lives in the refresh token, so the plaintext
+    -- password is no longer needed.
+    self.settings:clearPassword()
+end
+
+function GrimmoryAPI:onSignedOut()
+    self.cached_token_expiry = 0
+    self.cached_refresh_token = nil
+    self.cached_access_token = nil
+
+    self.settings:clearRefreshToken()
 end
 
 function GrimmoryAPI:getUri(path)
@@ -343,12 +379,13 @@ function GrimmoryAPI:request(method, path, data, headers, sink)
             self.cached_token_expiry = os.time() + (expiration or 3600)
             self.cached_refresh_token = refresh_token
             self.cached_access_token = access_token
+
+            self:onSignedIn(refresh_token)
         else
             -- We're expired and can't refresh.  Toss out the cached
             -- token data and let the block below do its deal.
-            self.cached_token_expiry = 0
-            self.cached_refresh_token = nil
-            self.cached_access_token = nil
+            logger:warn("Refresh token was rejected, signing out")
+            self:onSignedOut()
         end
     end
 
@@ -360,6 +397,10 @@ function GrimmoryAPI:request(method, path, data, headers, sink)
         )
 
         if not access_token_ok or not access_token or not refresh_token then
+            -- Without a password there is nothing left to try, so the
+            -- user has to sign in again from the connection settings.
+            self.requires_sign_in = true
+
             return false, 0, "Could not get access token"
         end
 
@@ -368,6 +409,8 @@ function GrimmoryAPI:request(method, path, data, headers, sink)
         self.cached_token_expiry = os.time() + (expiration or 3600)
         self.cached_refresh_token = refresh_token
         self.cached_access_token = access_token
+
+        self:onSignedIn(refresh_token)
     end
 
     if self.cached_access_token then
@@ -378,13 +421,41 @@ function GrimmoryAPI:request(method, path, data, headers, sink)
 
     if code == 401 then
         logger:warn("Token expired or was otherwise invalid")
-        self.cached_token_expiry = nil
-        self.cached_refresh_token = nil
+        -- Only the access token is known to be bad; the refresh token
+        -- gets a chance to mint a new one on the next request.
+        self.cached_token_expiry = 0
         self.cached_access_token = nil
     end
 
 
     return ok, code, response
+end
+
+-- Exchanges a password for tokens so it never has to be written to disk.
+---@param username string
+---@param password string
+---@return boolean ok
+---@return string | nil message
+function GrimmoryAPI:signIn(username, password)
+    local ok, access_token, refresh_token, expiration = self:getToken(
+        self.settings:getBaseUri(),
+        username,
+        password
+    )
+
+    if not ok or not access_token or not refresh_token then
+        self.requires_sign_in = true
+
+        return false, type(access_token) == "string" and access_token or nil
+    end
+
+    self.cached_token_expiry = os.time() + (expiration or 3600)
+    self.cached_refresh_token = refresh_token
+    self.cached_access_token = access_token
+
+    self:onSignedIn(refresh_token)
+
+    return true, nil
 end
 
 function GrimmoryAPI:testConnection(base_uri, username, password)
@@ -621,35 +692,75 @@ function GrimmoryAPI:recordSession(
 end
 
 -- Grimmory doesn't deduplicate reading sessions, so a session that may
--- have been delivered is looked up before it's recorded again.
+-- have been delivered is looked up before it's recorded again.  The
+-- endpoint has no time filter, so the pages are walked until the session
+-- shows up or the book runs out of sessions.
+local SESSION_PAGE_SIZE = 100
+
+-- A book with more sessions than this has other problems; the cap only
+-- exists so a misbehaving server can't spin forever.
+local MAX_SESSION_PAGES = 100
+
+---@param body table
+---@return number | nil total_pages
+local function get_total_pages(body)
+    if type(body["page"]) == "table" then
+        return from_json_number(body["page"]["totalPages"])
+    end
+
+    return from_json_number(body["totalPages"])
+end
+
 ---@param book_id number
 ---@param start_time number
 ---@param duration_seconds number
 ---@return boolean ok
 ---@return boolean found
 function GrimmoryAPI:hasRecordedSession(book_id, start_time, duration_seconds)
-    local start_time_iso8601 = to_iso8601(start_time)
+    local page = 0
 
-    local ok, _, body = self:request(
-        "GET",
-        "/api/v1/reading-sessions/book/" .. tonumber(book_id) .. "?page=0&size=100"
-    )
+    while page < MAX_SESSION_PAGES do
+        local ok, _, body = self:request(
+            "GET",
+            "/api/v1/reading-sessions/book/" .. tonumber(book_id) ..
+                "?page=" .. tostring(page) ..
+                "&size=" .. tostring(SESSION_PAGE_SIZE)
+        )
 
-    if not ok or type(body) ~= "table" then
-        logger:err("Unable to read recorded sessions", body)
-        return false, false
-    end
-
-    for _, session in ipairs(body["content"] or {}) do
-        if
-            from_json_string(session["startTime"]) == start_time_iso8601 and
-            from_json_number(session["durationSeconds"]) == duration_seconds
-        then
-            return true, true
+        if not ok or type(body) ~= "table" then
+            logger:err("Unable to read recorded sessions", body)
+            return false, false
         end
+
+        local sessions = body["content"] or {}
+
+        for _, session in ipairs(sessions) do
+            -- Timestamps are compared as instants rather than strings so
+            -- the server is free to format them differently.
+            if
+                from_json_iso8601(session["startTime"]) == start_time and
+                from_json_number(session["durationSeconds"]) == duration_seconds
+            then
+                return true, true
+            end
+        end
+
+        if #sessions < SESSION_PAGE_SIZE then
+            -- A short page is the last page.
+            return true, false
+        end
+
+        local total_pages = get_total_pages(body)
+
+        if total_pages ~= nil and page + 1 >= total_pages then
+            return true, false
+        end
+
+        page = page + 1
     end
 
-    return true, false
+    logger:warn("Gave up looking for a recorded session for book:", book_id)
+    return false, false
 end
 
 function GrimmoryAPI:getKoreaderSync()

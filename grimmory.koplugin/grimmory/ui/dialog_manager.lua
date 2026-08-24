@@ -65,8 +65,10 @@ function DialogManager:showConnectionSettings()
                 description = _("Username"),
             },
             {
-                text = self.settings:getPassword(),
-                description = _("Password"),
+                -- The password is exchanged for a token on sign in and is
+                -- never written to the settings file.
+                text = "",
+                description = _("Password (only used to sign in)"),
                 text_type = "password",
             },
         },
@@ -102,9 +104,32 @@ function DialogManager:showConnectionSettings()
                 callback = function()
                     local fields = dialog:getFields()
 
+                    local previous_base_uri = self.settings:getBaseUri()
+                    local previous_username = self.settings:getUsername()
+
                     self.settings:setBaseUri(fields[1])
                     self.settings:setUsername(fields[2])
-                    self.settings:setPassword(fields[3])
+
+                    if
+                        previous_base_uri ~= self.settings:getBaseUri() or
+                        previous_username ~= self.settings:getUsername()
+                    then
+                        -- Cached tokens belong to the previous server or
+                        -- user, so they can't be reused.
+                        self.api:onSignedOut()
+                    end
+
+                    local password = fields[3]
+
+                    if password ~= nil and password ~= "" then
+                        local ok, message = self.api:signIn(fields[2], password)
+
+                        if ok then
+                            self:toast(_("Signed in to Grimmory"))
+                        else
+                            self:toast(T(_("Unable to sign in to Grimmory\nError: %1"), tostring(message)))
+                        end
+                    end
 
                     UIManager:broadcastEvent(Event:new("GrimmorySettingsChanged"))
 

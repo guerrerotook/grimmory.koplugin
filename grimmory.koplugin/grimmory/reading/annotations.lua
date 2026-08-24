@@ -1,6 +1,7 @@
 local DocumentRegistry = require("document/documentregistry")
 
 local GrimmoryCFIResolver = require("grimmory/cfi_resolver")
+local GrimmoryDateTime = require("grimmory/datetime")
 
 
 ---@param value integer
@@ -33,14 +34,23 @@ local function from_annotation_datetime(value)
         "(%d+)-(%d+)-(%d+) (%d+):(%d+):(%d+)"
     )
 
-    return os.time({
+    local fields = {
         year = year,
         month = month,
         day = day,
         hour = hour,
         min = min,
         sec = sec
-    })
+    }
+
+    -- Annotations written by this plugin are stamped in UTC and marked
+    -- with a trailing "Z".  Anything else was written by KOReader itself
+    -- and is in the device's local time.
+    if value:match("Z%s*$") then
+        return GrimmoryDateTime.fromUTC(fields)
+    end
+
+    return GrimmoryDateTime.fromLocal(fields)
 end
 
 ---@param document_path string

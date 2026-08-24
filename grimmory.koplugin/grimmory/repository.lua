@@ -302,6 +302,49 @@ function GrimmoryLocalRepository:findBookByFile(book_path, partial_md5)
     return true, book.id, book.grimmory_id
 end
 
+---@param book_id number
+---@return boolean ok
+---@return GrimmoryLocalBook | nil book
+function GrimmoryLocalRepository:findBookById(book_id)
+    local ok, book = with_database(
+        self.database_path,
+        function(conn)
+            local select_stmt = conn:prepare([[
+                SELECT
+                    id,
+                    book_path,
+                    partial_md5,
+                    grimmory_id
+                FROM book
+                WHERE
+                    id = ?
+            ]])
+
+            select_stmt:bind(book_id)
+            local row = select_stmt:step()
+            select_stmt:close()
+
+            if not row then
+                return nil
+            end
+
+            return {
+                id = tonumber(row[1]),
+                book_path = row[2],
+                book_md5 = row[3],
+                grimmory_id = tonumber(row[4]),
+            }
+        end
+    )
+
+    if not ok then
+        logger:err("Failed to find book:", book_id, "-", book)
+        return false, nil
+    end
+
+    return true, book
+end
+
 ---@param grimmory_id number
 ---@return boolean ok
 ---@return GrimmoryLocalBook[] books
