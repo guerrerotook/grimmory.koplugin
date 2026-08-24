@@ -175,6 +175,93 @@ local function getUserAgent()
     return "grimmory.koplugin/" .. PluginMetadata.getVersion() .. " (" .. PluginMetadata.getRepository() .. ")"
 end
 
+---@param value string
+---@return string
+local function url_escape(value)
+    return tostring(value):gsub("[^%w%-%.%_%~]", function(character)
+        return string.format("%%%02X", string.byte(character))
+    end)
+end
+
+-- A multipart part name or filename cannot carry a quote or a newline
+-- without breaking the headers that describe it.
+---@param value string
+---@return string
+local function sanitize_multipart_value(value)
+    return tostring(value):gsub("[\r\n\"]", "_")
+end
+
+---@param path string
+---@return string
+local function basename(path)
+    return tostring(path):match("([^/\\]+)$") or tostring(path)
+end
+
+-- Builds a `multipart/form-data` body that streams the file from disk
+-- instead of reading it into memory, which matters on devices where a
+-- book is far larger than the memory the plugin should be using.
+---@param fields { [string]: string }
+---@param file_field string
+---@param file_path string
+---@return table | nil body
+---@return string | nil error_message
+local function multipart_body(fields, file_field, file_path)
+    local file, file_error = io.open(file_path, "rb")
+
+    if not file then
+        return nil, file_error or "Unable to open file"
+    end
+
+    local file_size = file:seek("end")
+    file:seek("set")
+
+    if file_size == nil then
+        file:close()
+        return nil, "Unable to measure file"
+    end
+
+    local boundary = "----grimmoryKOReader" ..
+        tostring(os.time()) ..
+        tostring(math.random(100000, 999999))
+
+    local head = {}
+
+    for name, value in pairs(fields) do
+        table.insert(head, "--" .. boundary .. "\r\n")
+        table.insert(
+            head,
+            "Content-Disposition: form-data; name=\"" ..
+                sanitize_multipart_value(name) .. "\"\r\n\r\n"
+        )
+        table.insert(head, tostring(value) .. "\r\n")
+    end
+
+    table.insert(head, "--" .. boundary .. "\r\n")
+    table.insert(
+        head,
+        "Content-Disposition: form-data; name=\"" ..
+            sanitize_multipart_value(file_field) .. "\"; filename=\"" ..
+            sanitize_multipart_value(basename(file_path)) .. "\"\r\n"
+    )
+    -- Grimmory decides the format from the file extension, so the part
+    -- type only has to be something binary-safe.
+    table.insert(head, "Content-Type: application/octet-stream\r\n\r\n")
+
+    local head_text = table.concat(head)
+    local tail_text = "\r\n--" .. boundary .. "--\r\n"
+
+    return {
+        __raw_body = true,
+        content_type = "multipart/form-data; boundary=" .. boundary,
+        content_length = #head_text + file_size + #tail_text,
+        source = ltn12.source.cat(
+            ltn12.source.string(head_text),
+            ltn12.source.file(file),
+            ltn12.source.string(tail_text)
+        ),
+    }
+end
+
 ---@class GrimmoryAPI
 ---@field settings GrimmorySettings
 ---@field private cached_access_token string
@@ -324,12 +411,21 @@ function GrimmoryAPI:rawRequest(method, uri, data, headers, sink)
     local source = nil
 
     if data then
-        local body = json.encode(data)
+        if type(data) == "table" and data.__raw_body then
+            -- A body that is not JSON (a file upload) describes its own
+            -- type and length.
+            headers["Content-Type"] = data.content_type
+            headers["Content-Length"] = data.content_length
 
-        headers["Content-Type"] = "application/json"
-        headers["Content-Length"] = string.len(body)
+            source = data.source
+        else
+            local body = json.encode(data)
 
-        source = ltn12.source.string(body)
+            headers["Content-Type"] = "application/json"
+            headers["Content-Length"] = string.len(body)
+
+            source = ltn12.source.string(body)
+        end
     end
 
     local response_table = {}
@@ -559,10 +655,16 @@ end
 ---@return boolean ok
 ---@return Book[] | string page_books
 ---@return number total_count
-function GrimmoryAPI:getBooksPage(page_number)
+function GrimmoryAPI:getBooksPage(page_number, query)
+    local path = "/api/v1/books/page?sort=addedOn&page=" .. tostring(page_number or 0)
+
+    if query ~= nil and query ~= "" then
+        path = path .. "&query=" .. url_escape(query)
+    end
+
     local ok, _, body = self:request(
         "GET",
-        "/api/v1/books/page?sort=addedOn&page=" .. tostring(page_number or 0)
+        path
     )
 
     if not ok or type(body) == "string" then
@@ -682,6 +784,191 @@ function GrimmoryAPI:getShelves()
     end
 
     return ok, shelves
+end
+
+---@class GrimmoryLibraryPath
+---@field id number
+---@field path string
+
+---@class GrimmoryLibrary
+---@field id number
+---@field name string
+---@field paths GrimmoryLibraryPath[]
+
+---@return boolean ok
+---@return GrimmoryLibrary[] | string libraries
+function GrimmoryAPI:getLibraries()
+    local ok, _, body = self:request(
+        "GET",
+        "/api/v1/libraries"
+    )
+
+    if not ok or type(body) ~= "table" then
+        logger:err("Could not get libraries", body)
+        return false, body
+    end
+
+    local libraries = {}
+
+    for _, body_library in ipairs(body) do
+        local paths = {}
+
+        for _, body_path in ipairs(body_library.paths or {}) do
+            table.insert(paths, {
+                id = from_json_number(body_path.id),
+                path = from_json_string(body_path.path),
+            })
+        end
+
+        table.insert(libraries, {
+            id = from_json_number(body_library.id),
+            name = from_json_string(body_library.name),
+            paths = paths,
+        })
+    end
+
+    return true, libraries
+end
+
+-- Uploads a book file into a library path.  Grimmory answers as soon as
+-- the file has been stored; the book itself only shows up once the
+-- server has processed it, so callers have to look it up afterwards.
+---@param file_path string
+---@param library_id number
+---@param path_id number
+---@return boolean ok
+---@return number code
+---@return string | nil message
+function GrimmoryAPI:uploadBook(file_path, library_id, path_id)
+    local body, body_error = multipart_body(
+        {
+            libraryId = tostring(library_id),
+            pathId = tostring(path_id),
+        },
+        "file",
+        file_path
+    )
+
+    if body == nil then
+        logger:err("Unable to read book for upload:", file_path, "-", body_error)
+        return false, 0, body_error
+    end
+
+    local ok, code, response = self:request(
+        "POST",
+        "/api/v1/files/upload",
+        body
+    )
+
+    if not ok then
+        logger:err("Unable to upload book:", file_path, "-", response)
+
+        if type(response) == "string" then
+            return false, code, response
+        end
+
+        return false, code, "HTTP Error: " .. tostring(code)
+    end
+
+    return true, code, nil
+end
+
+---@param value string | nil
+---@return string | nil
+local function normalize_for_match(value)
+    if type(value) ~= "string" or value == "" then
+        return nil
+    end
+
+    return value:lower()
+end
+
+---@param filename string | nil
+---@return string | nil
+local function strip_extension(filename)
+    if type(filename) ~= "string" or filename == "" then
+        return nil
+    end
+
+    return (filename:gsub("%.[^%.]+$", ""))
+end
+
+-- Grimmory has no way to look a book up by its file name, and it renames
+-- an uploaded file to match the library's naming pattern, so the book is
+-- searched for by title with the file name only used to confirm a match.
+---@param title string | nil
+---@param filename string | nil
+---@return boolean ok
+---@return Book | nil book
+function GrimmoryAPI:findBook(title, filename)
+    local queries = {}
+
+    if title ~= nil and title ~= "" then
+        table.insert(queries, title)
+    end
+
+    local filename_title = strip_extension(filename)
+    if filename_title ~= nil and filename_title ~= "" and filename_title ~= title then
+        table.insert(queries, filename_title)
+    end
+
+    if #queries == 0 then
+        return false, nil
+    end
+
+    local wanted_title = normalize_for_match(title) or normalize_for_match(filename_title)
+    local wanted_filename = normalize_for_match(filename)
+
+    for _, query in ipairs(queries) do
+        local ok, books = self:getBooksPage(0, query)
+
+        if not ok or type(books) ~= "table" then
+            return false, nil
+        end
+
+        for _, book in ipairs(books) do
+            local book_filename = nil
+            if book.primary_file ~= nil then
+                book_filename = normalize_for_match(book.primary_file.filename)
+            end
+
+            if wanted_filename ~= nil and book_filename == wanted_filename then
+                return true, book
+            end
+
+            if wanted_title ~= nil and normalize_for_match(book.metadata.title) == wanted_title then
+                return true, book
+            end
+        end
+    end
+
+    return true, nil
+end
+
+---@param book_ids number[]
+---@param shelves_to_assign number[]
+---@param shelves_to_unassign number[] | nil
+---@return boolean ok
+---@return string | nil message
+function GrimmoryAPI:assignShelves(book_ids, shelves_to_assign, shelves_to_unassign)
+    local request = {
+        bookIds = book_ids,
+        shelvesToAssign = shelves_to_assign,
+        shelvesToUnassign = shelves_to_unassign or {},
+    }
+
+    local ok, _, body = self:request(
+        "POST",
+        "/api/v1/books/shelves",
+        request
+    )
+
+    if not ok then
+        logger:err("Unable to assign shelves", body)
+        return false, type(body) == "string" and body or nil
+    end
+
+    return true, nil
 end
 
 ---@param book_id number

@@ -317,6 +317,159 @@ function DialogManager:showDownloadDirectorySettings()
     UIManager:show(dialog)
 end
 
+function DialogManager:showUploadDirectorySettings()
+    local current_directory = self.settings:getUploadDirectory()
+
+    local dialog = PathChooser:new({
+        title = _("Upload Folder"),
+        select_file = false,
+        show_files = false,
+        path = current_directory ~= "" and current_directory or nil,
+        onConfirm = function(newPath)
+            if newPath == self.settings:getDownloadDirectory() then
+                -- Watching the download folder would send every book that
+                -- was just downloaded straight back to Grimmory.
+                self:toast(_("The upload folder cannot be the download folder"))
+                return
+            end
+
+            self.settings:setUploadDirectory(newPath)
+
+            UIManager:broadcastEvent(Event:new("GrimmorySettingsChanged"))
+        end,
+    })
+
+    UIManager:show(dialog)
+end
+
+function DialogManager:showUploadLibrarySettings()
+    local dialog
+    local ok, libraries = self.api:getLibraries()
+
+    if not ok or type(libraries) ~= "table" then
+        logger:err("Something went wrong loading libraries", libraries)
+        self:toast(T(_("Could not load libraries: %1"), tostring(libraries)))
+        return
+    end
+
+    local buttons = {
+        {
+            {
+                text = _("Cancel Selection"),
+                callback = function()
+                    UIManager:close(dialog)
+                end,
+            }
+        },
+    }
+
+    for _, library in ipairs(libraries) do
+        for _, library_path in ipairs(library.paths or {}) do
+            local text = library.name
+
+            if #library.paths > 1 then
+                text = library.name .. " (" .. tostring(library_path.path) .. ")"
+            end
+
+            table.insert(
+                buttons,
+                {
+                    {
+                        text = text,
+                        callback = function()
+                            logger:dbg("Set upload library to", library.id, library_path.id)
+
+                            self.settings:setUploadLibrary({
+                                id = library.id,
+                                name = library.name,
+                                path_id = library_path.id,
+                                path = library_path.path,
+                            })
+
+                            UIManager:broadcastEvent(Event:new("GrimmorySettingsChanged"))
+
+                            UIManager:close(dialog)
+                        end,
+                    }
+                }
+            )
+        end
+    end
+
+    if #buttons == 1 then
+        self:toast(_("No libraries are available to upload into"))
+        return
+    end
+
+    dialog = ButtonDialog:new({
+        title = _("Upload Library"),
+        buttons = buttons,
+    })
+
+    UIManager:show(dialog)
+end
+
+function DialogManager:showUploadShelfSettings()
+    local dialog
+    local ok, shelves = self.api:getShelves()
+
+    if not ok or type(shelves) ~= "table" then
+        logger:err("Something went wrong loading shelves", shelves)
+        self:toast(T(_("Could not load shelves: %1"), tostring(shelves)))
+        return
+    end
+
+    local buttons = {
+        {
+            {
+                text = _("Cancel Selection"),
+                callback = function()
+                    UIManager:close(dialog)
+                end,
+            }
+        },
+        {
+            {
+                text = _("No Shelf"),
+                callback = function()
+                    self.settings:setUploadTargetShelf(nil)
+
+                    UIManager:broadcastEvent(Event:new("GrimmorySettingsChanged"))
+
+                    UIManager:close(dialog)
+                end,
+            }
+        },
+    }
+
+    for _, shelf in ipairs(shelves) do
+        table.insert(
+            buttons,
+            {
+                {
+                    text = shelf.name,
+                    callback = function()
+                        logger:dbg("Set upload shelf to shelf ID", shelf.id)
+
+                        self.settings:setUploadTargetShelf({ id = shelf.id, name = shelf.name })
+
+                        UIManager:broadcastEvent(Event:new("GrimmorySettingsChanged"))
+
+                        UIManager:close(dialog)
+                    end,
+                }
+            }
+        )
+    end
+
+    dialog = ButtonDialog:new({
+        title = _("Upload Shelf"),
+        buttons = buttons,
+    })
+
+    UIManager:show(dialog)
+end
+
 function DialogManager:showPluginUpdateCheck(skip_version_check)
     if not skip_version_check then
         -- Refresh the latest version on open.

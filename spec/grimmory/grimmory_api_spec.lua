@@ -404,3 +404,84 @@ describe("GrimmoryAPI auth", function()
         assert.are.equal("stored-token", settings.refresh_token)
     end)
 end)
+
+describe("GrimmoryAPI findBook", function()
+    ---@param responses table<string, table>
+    local function make_search_api(responses)
+        local api = GrimmoryAPI:new({
+            settings = {
+                getRefreshToken = function() return "" end,
+            },
+        })
+
+        api.queries = {}
+
+        api.request = function(self, _, path)
+            local query = path:match("query=([^&]*)")
+            table.insert(self.queries, query)
+
+            return true, 200, { content = responses[query] or {} }
+        end
+
+        return api
+    end
+
+    it("matches the book by file name", function()
+        local api = make_search_api({
+            ["An%20Article"] = {
+                { id = 1, primaryFile = { fileName = "Something Else.epub" } },
+                { id = 2, primaryFile = { fileName = "An Article.epub" } },
+            },
+        })
+
+        local ok, book = api:findBook("An Article", "An Article.epub")
+
+        assert.is_true(ok)
+        assert.are.equal(2, book.id)
+    end)
+
+    it("matches the book by title when the server renamed the file", function()
+        local api = make_search_api({
+            ["An%20Article"] = {
+                { id = 3, metadata = { title = "an article" }, primaryFile = { fileName = "renamed.epub" } },
+            },
+        })
+
+        local ok, book = api:findBook("An Article", "An Article.epub")
+
+        assert.is_true(ok)
+        assert.are.equal(3, book.id)
+    end)
+
+    it("falls back to the file name when there is no title", function()
+        local api = make_search_api({
+            ["An%20Article"] = {
+                { id = 4, primaryFile = { fileName = "An Article.epub" } },
+            },
+        })
+
+        local ok, book = api:findBook(nil, "An Article.epub")
+
+        assert.is_true(ok)
+        assert.are.equal(4, book.id)
+        assert.are.same({ "An%20Article" }, api.queries)
+    end)
+
+    it("reports no book when nothing matches", function()
+        local api = make_search_api({})
+
+        local ok, book = api:findBook("An Article", "An Article.epub")
+
+        assert.is_true(ok)
+        assert.is_nil(book)
+    end)
+
+    it("reports a failure without anything to search for", function()
+        local api = make_search_api({})
+
+        local ok = api:findBook(nil, nil)
+
+        assert.is_false(ok)
+        assert.are.equal(0, #api.queries)
+    end)
+end)

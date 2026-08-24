@@ -62,6 +62,40 @@ Short sessions can be filtered out with:
 Skipped sessions are dropped permanently and are not retried on the next
 sync.
 
+## Uploading Books
+
+KOReader can save a Wikipedia article as an EPUB, and those files always
+land in the same folder on the device.  The plugin can watch that folder,
+upload anything it finds to Grimmory, and delete the local copy once
+Grimmory has processed the book.
+
+Turn it on with:
+
+**Tools** -> **Grimmory** -> **Upload Books**
+
+Then configure it under:
+
+**Tools** -> **Grimmory** -> **Upload Configuration**
+
+- **Upload Folder** — the folder that is watched for new books.  Point it
+  at the folder KOReader saves Wikipedia articles into.  It cannot be the
+  download folder, otherwise downloaded books would be sent straight back.
+- **Target Library** — the Grimmory library (and library path) the books
+  are uploaded into.
+- **Target Shelf** — an optional shelf the uploaded books are added to.
+- **Delete Local Copy After Upload** — removes the file from the device
+  once the book exists in Grimmory (enabled by default).
+
+Uploads happen as part of a normal sync.  Only book files are uploaded
+(EPUB, PDF, CBZ, CBR, CB7, MOBI, AZW, AZW3, FB2 and DJVU), and files that
+were written moments ago are left for the next sync so a half-written
+file is never sent.
+
+A local copy is only deleted after Grimmory has finished processing the
+book and, when a shelf is configured, after the book has been added to
+that shelf.  Anything else keeps the file on the device so the next sync
+can try again.
+
 ## License
 
 Distributed under the terms of the [AGPL-3.0 License](./LICENSE).
