@@ -185,12 +185,22 @@ describe("GrimmorySynchronize", function()
         end)
 
         it("recreates annotations whose position changed, as the server cannot update it", function()
+            local calls = {}
+
             local synchronize = make_annotation_synchronize(
                 { { id = 27, cfi = "new-cfi", text = "text" } },
                 { 27 },
                 {
                     getAnnotations = spy.new(function()
                         return true, { { id = 27, cfi = "old-cfi", text = "text" } }
+                    end),
+                    createAnnotation = spy.new(function()
+                        table.insert(calls, "create")
+                        return true, {}
+                    end),
+                    deleteAnnotation = spy.new(function()
+                        table.insert(calls, "delete")
+                        return true
                     end),
                 }
             )
@@ -200,6 +210,28 @@ describe("GrimmorySynchronize", function()
             assert.spy(synchronize.api.updateAnnotation).was_not.called()
             assert.spy(synchronize.api.deleteAnnotation).was.called_with(synchronize.api, 27)
             assert.spy(synchronize.api.createAnnotation).was.called(1)
+            assert.are.same({ "create", "delete" }, calls)
+        end)
+
+        it("keeps a moved annotation on the server when its replacement fails", function()
+            local synchronize = make_annotation_synchronize(
+                { { id = 27, cfi = "new-cfi", text = "text" } },
+                { 27 },
+                {
+                    getAnnotations = spy.new(function()
+                        return true, { { id = 27, cfi = "old-cfi", text = "text" } }
+                    end),
+                    createAnnotation = spy.new(function() return false, "boom" end),
+                }
+            )
+
+            synchronize:pushBookAnnotations("/books/book.epub", 1)
+
+            -- Dropping the old copy here would leave the highlight
+            -- nowhere: gone from the server and dropped locally by the
+            -- next pull.
+            assert.spy(synchronize.api.deleteAnnotation).was_not.called()
+            assert.spy(synchronize.doc_metadata.removeModifiedGrimmoryAnnotation).was_not.called()
         end)
 
         it("deletes annotations that were removed locally", function()

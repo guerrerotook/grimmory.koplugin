@@ -177,7 +177,6 @@ end
 
 ---@class GrimmoryAPI
 ---@field settings GrimmorySettings
----@field requires_sign_in boolean
 ---@field private cached_access_token string
 ---@field private cached_refresh_token string
 ---@field private cached_token_expiry number
@@ -197,8 +196,6 @@ function GrimmoryAPI:init()
     self.cached_access_token = nil
     self.cached_refresh_token = nil
     self.cached_token_expiry = 0
-
-    self.requires_sign_in = false
 end
 
 -- Grimmory rotates the refresh token on every use and revokes the
@@ -206,8 +203,6 @@ end
 -- away or the session is lost.
 ---@param refresh_token string | nil
 function GrimmoryAPI:onSignedIn(refresh_token)
-    self.requires_sign_in = false
-
     self.settings:setRefreshToken(refresh_token)
 end
 
@@ -230,15 +225,12 @@ function GrimmoryAPI:reloadStoredSession()
     end
 end
 
--- Whether syncing is blocked until the user signs in again, which the
--- stored credentials answer even when the failure happened in another
--- process.
+-- Whether syncing is blocked until the user signs in again.  This is
+-- answered by what is stored rather than by what this process has seen,
+-- because a sync failure happens in a subprocess and a network failure
+-- says nothing about the credentials.
 ---@return boolean
 function GrimmoryAPI:requiresSignIn()
-    if self.requires_sign_in then
-        return true
-    end
-
     return
         self.settings:getRefreshToken() == "" and
         self.settings:getPassword() == ""
@@ -431,12 +423,8 @@ function GrimmoryAPI:request(method, path, data, headers, sink)
         )
 
         if not access_token_ok or not access_token or not refresh_token then
-            -- Without a usable password there is nothing left to try, so
-            -- the user has to sign in from the connection settings.
-            if self.settings:getPassword() == "" then
-                self.requires_sign_in = true
-            end
-
+            -- There is nothing left to try here; `requiresSignIn` tells
+            -- the user whether that is because of their credentials.
             return false, 0, "Could not get access token"
         end
 
@@ -480,8 +468,6 @@ function GrimmoryAPI:signIn(username, password)
     )
 
     if not ok or not access_token or not refresh_token then
-        self.requires_sign_in = true
-
         return false, type(access_token) == "string" and access_token or nil
     end
 

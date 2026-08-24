@@ -274,7 +274,7 @@ describe("GrimmoryAPI auth", function()
 
         assert.is_false(ok)
         assert.are.equal("stored-token", settings.refresh_token)
-        assert.is_false(api.requires_sign_in)
+        assert.is_false(api:requiresSignIn())
     end)
 
     it("keeps the stored token when the server is broken", function()
@@ -300,7 +300,7 @@ describe("GrimmoryAPI auth", function()
         api:request("GET", "/api/v1/version")
 
         assert.are.equal("", settings.refresh_token)
-        assert.is_true(api.requires_sign_in)
+        assert.is_true(api:requiresSignIn())
     end)
 
     it("stores the rotated token on every refresh", function()
@@ -385,5 +385,22 @@ describe("GrimmoryAPI auth", function()
 
         assert.is_false(ok)
         assert.are.equal(0, #api.calls)
+    end)
+
+    it("does not ask for a sign in after one fails for transport reasons", function()
+        local settings = make_settings({ refresh_token = "stored-token" })
+
+        local api = make_auth_api(settings, {
+            ["/auth/login"] = { false, 0, "timeout" },
+        })
+
+        local ok = api:signIn("reader", "hunter2")
+
+        assert.is_false(ok)
+        assert.are.equal(1, #api.calls)
+        -- Being offline says nothing about the credentials, and the
+        -- stored session still works once the network comes back.
+        assert.is_false(api:requiresSignIn())
+        assert.are.equal("stored-token", settings.refresh_token)
     end)
 end)

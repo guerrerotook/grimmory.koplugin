@@ -314,6 +314,7 @@ function GrimmorySynchronize:pushBookAnnotations(book_path, book_grimmory_id)
     end
 
     ---@param annotation GrimmoryAnnotation
+    ---@return boolean created
     local function create_annotation(annotation)
         local create_ok, remote_annotation = self.api:createAnnotation(
             book_grimmory_id,
@@ -330,6 +331,8 @@ function GrimmorySynchronize:pushBookAnnotations(book_path, book_grimmory_id)
         else
             logger:err("Failed to push annotation", remote_annotation)
         end
+
+        return create_ok
     end
 
     for _, annotation in ipairs(local_annotations) do
@@ -340,13 +343,22 @@ function GrimmorySynchronize:pushBookAnnotations(book_path, book_grimmory_id)
             -- rather than removed.
             if is_moved(annotation) then
                 -- The highlight itself moved, which Grimmory's update
-                -- endpoint cannot express, so it is replaced.
+                -- endpoint cannot express, so it is replaced.  The
+                -- replacement is created first: dropping the old copy
+                -- before the new one exists would lose the highlight
+                -- entirely if the connection died in between.
                 logger:dbg("Replacing moved annotation in Grimmory:", book_path, "-", annotation.id)
 
-                self.api:deleteAnnotation(annotation.id)
-                create_annotation(annotation)
+                if create_annotation(annotation) then
+                    self.api:deleteAnnotation(annotation.id)
 
-                self.doc_metadata:removeModifiedGrimmoryAnnotation(book_path, annotation.id)
+                    self.doc_metadata:removeModifiedGrimmoryAnnotation(book_path, annotation.id)
+                else
+                    logger:err(
+                        "Failed to replace moved annotation, retrying on a later sync:",
+                        annotation.id
+                    )
+                end
             else
                 -- Updating in place keeps the Grimmory annotation ID, its
                 -- creation date and any web reader links.
