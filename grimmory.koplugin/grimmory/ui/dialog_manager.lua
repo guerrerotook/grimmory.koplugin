@@ -325,9 +325,9 @@ function DialogManager:showUploadDirectorySettings()
         title = _("Long-press folder's name to choose it"),
         select_directory = true,
         select_file = false,
-        -- Files are listed but not selectable so the folder contents are
-        -- visible while browsing.
-        show_files = true,
+        -- Only folders are listed so they are easy to spot and select even in
+        -- directories that contain a lot of files.
+        show_files = false,
         -- An empty string makes PathChooser fall back to the home folder,
         -- while nil would leave it in KOReader's own working directory.
         path = current_directory,
