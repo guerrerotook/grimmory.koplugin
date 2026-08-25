@@ -322,10 +322,15 @@ function DialogManager:showUploadDirectorySettings()
     local current_directory = self.settings:getUploadDirectory()
 
     local dialog = PathChooser:new({
-        title = _("Upload Folder"),
+        title = _("Long-press folder's name to choose it"),
+        select_directory = true,
         select_file = false,
-        show_files = false,
-        path = current_directory ~= "" and current_directory or nil,
+        -- Files are listed but not selectable so the folder contents are
+        -- visible while browsing.
+        show_files = true,
+        -- An empty string makes PathChooser fall back to the home folder,
+        -- while nil would leave it in KOReader's own working directory.
+        path = current_directory,
         onConfirm = function(newPath)
             if GrimmoryUpload.isDownloadDirectory(newPath, self.settings:getDownloadDirectory()) then
                 -- Watching the download folder would send every book that
