@@ -903,9 +903,11 @@ end
 -- Grimmory has no way to look a book up by its file name, and it renames
 -- an uploaded file to match the library's naming pattern, so the book is
 -- searched for by title with the file name only used to confirm a match.
--- When `strict` is set, a book only matches if both its file name and
--- its title line up, which is what tells an upload that was refused as a
--- duplicate apart from an unrelated book that merely shares a name.
+-- When `strict` is set, the title has to line up, which is what tells an
+-- upload that was refused as a duplicate apart from an unrelated book
+-- that merely ended up with the same file name on the server.  The file
+-- name alone is not enough in that case, and it cannot be required
+-- either because the server renames what it stores.
 ---@param title string | nil
 ---@param filename string | nil
 ---@param strict boolean | nil
@@ -927,7 +929,8 @@ function GrimmoryAPI:findBook(title, filename, strict)
         return false, nil
     end
 
-    local wanted_title = normalize_for_match(title) or normalize_for_match(filename_title)
+    local known_title = normalize_for_match(title)
+    local wanted_title = known_title or normalize_for_match(filename_title)
     local wanted_filename = normalize_for_match(filename)
 
     for _, query in ipairs(queries) do
@@ -949,10 +952,11 @@ function GrimmoryAPI:findBook(title, filename, strict)
             local title_matches = wanted_title ~= nil and book_title == wanted_title
 
             if strict then
-                if
-                    wanted_filename ~= nil and wanted_title ~= nil and
-                    filename_matches and title_matches
-                then
+                -- The stored file name is whatever the library naming
+                -- pattern produced, so only the title can confirm that
+                -- the refused upload is this very book.  Without a title
+                -- of its own the file name is all there is to go on.
+                if title_matches or (known_title == nil and filename_matches) then
                     return true, book
                 end
             elseif filename_matches or title_matches then
