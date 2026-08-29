@@ -528,3 +528,52 @@ describe("GrimmoryAPI findBook", function()
         assert.are.equal(0, #api.queries)
     end)
 end)
+
+describe("GrimmoryAPI refreshLibrary", function()
+    ---@param response table
+    local function make_library_api(response)
+        local api = GrimmoryAPI:new({
+            settings = {
+                getRefreshToken = function() return "" end,
+            },
+        })
+
+        api.calls = {}
+
+        api.request = function(self, method, path)
+            table.insert(self.calls, method .. " " .. path)
+
+            return response[1], response[2], response[3]
+        end
+
+        return api
+    end
+
+    it("asks the server to rescan the library", function()
+        local api = make_library_api({ true, 204, "" })
+
+        local ok, message = api:refreshLibrary(3)
+
+        assert.is_true(ok)
+        assert.is_nil(message)
+        assert.are.same({ "PUT /api/v1/libraries/3/refresh" }, api.calls)
+    end)
+
+    it("reports why the rescan was refused", function()
+        local api = make_library_api({ false, 403, "Forbidden" })
+
+        local ok, message = api:refreshLibrary(3)
+
+        assert.is_false(ok)
+        assert.are.equal("Forbidden", message)
+    end)
+
+    it("reports the status when there is no message", function()
+        local api = make_library_api({ false, 503, {} })
+
+        local ok, message = api:refreshLibrary(3)
+
+        assert.is_false(ok)
+        assert.are.equal("HTTP Error: 503", message)
+    end)
+end)
