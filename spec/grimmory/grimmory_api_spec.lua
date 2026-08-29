@@ -476,7 +476,7 @@ describe("GrimmoryAPI findBook", function()
         assert.is_nil(book)
     end)
 
-    it("requires the title and file name to match in strict mode", function()
+    it("requires the title to match in strict mode", function()
         local api = make_search_api({
             ["An%20Article"] = {
                 { id = 5, metadata = { title = "Another Article" }, primaryFile = { fileName = "An Article.epub" } },
@@ -489,10 +489,14 @@ describe("GrimmoryAPI findBook", function()
         assert.is_nil(book)
     end)
 
-    it("matches in strict mode when both the title and file name line up", function()
+    it("matches in strict mode when the server renamed the file", function()
         local api = make_search_api({
             ["An%20Article"] = {
-                { id = 6, metadata = { title = "An Article" }, primaryFile = { fileName = "An Article.epub" } },
+                {
+                    id = 6,
+                    metadata = { title = "An Article" },
+                    primaryFile = { fileName = "An Author - An Article.epub" },
+                },
             },
         })
 
@@ -500,6 +504,19 @@ describe("GrimmoryAPI findBook", function()
 
         assert.is_true(ok)
         assert.are.equal(6, book.id)
+    end)
+
+    it("falls back to the file name in strict mode when there is no title", function()
+        local api = make_search_api({
+            ["An%20Article"] = {
+                { id = 7, metadata = { title = "Another Article" }, primaryFile = { fileName = "An Article.epub" } },
+            },
+        })
+
+        local ok, book = api:findBook(nil, "An Article.epub", true)
+
+        assert.is_true(ok)
+        assert.are.equal(7, book.id)
     end)
 
     it("reports a failure without anything to search for", function()

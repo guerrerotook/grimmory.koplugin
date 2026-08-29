@@ -231,11 +231,12 @@ function GrimmoryUpload:uploadBook(path, callback)
 
     local upload_ok, code, message = self.api:uploadBook(path, library.id, library.path_id)
 
-    -- A 409 means Grimmory refused the file because it already holds one
-    -- with that name.  That is what an upload whose book has not been
-    -- created yet looks like on a retry, but it is also what an unrelated
-    -- book that happens to share a name looks like, so the book it refers
-    -- to has to match this file exactly before the local copy is removed.
+    -- A 409 means Grimmory refused the file because the library already
+    -- holds a file under the name it would be stored as.  That is what an
+    -- upload whose book has not been created yet looks like on a retry,
+    -- but it is also what an unrelated book that ends up with the same
+    -- name looks like, so the book it refers to has to match this file
+    -- before the local copy is removed.
     local is_duplicate = not upload_ok and code == 409
 
     if not upload_ok and not is_duplicate then
@@ -254,9 +255,14 @@ function GrimmoryUpload:uploadBook(path, callback)
 
     if book == nil then
         if is_duplicate then
-            -- Grimmory holds a different book under this name, so there is
-            -- nothing to retry and the file stays where it is.
-            logger:err("A different book already exists in Grimmory for:", path)
+            -- Grimmory stores a file under this name but no book of this
+            -- title exists, so there is nothing to remove locally.  The
+            -- file stays where it is in case the library still has to
+            -- pick the stored file up.
+            logger:err(
+                "Grimmory already stores a file with this name but holds no matching book for:",
+                path
+            )
 
             callback({
                 state = "book-upload-error",
