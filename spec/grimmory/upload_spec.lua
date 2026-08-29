@@ -82,6 +82,7 @@ local function make_upload(api_overrides, settings_overrides)
         uploadBook = spy.new(function() return true, 204, nil end),
         findBook = spy.new(function() return true, { id = 42 } end),
         assignShelves = spy.new(function() return true, nil end),
+        refreshLibrary = spy.new(function() return true, nil end),
     }
 
     for key, value in pairs(api_overrides or {}) do
@@ -208,7 +209,7 @@ describe("GrimmoryUpload", function()
         end)
 
         it("keeps the local copy when a different book owns the name", function()
-            local upload = make_upload({
+            local upload, api = make_upload({
                 uploadBook = spy.new(function() return false, 409, "File already exists" end),
                 findBook = spy.new(function() return true, nil end),
             })
@@ -216,8 +217,62 @@ describe("GrimmoryUpload", function()
 
             upload:uploadBooks(collect_states(states))
 
+            assert.spy(api.refreshLibrary).was_called_with(api, 1)
             assert.are.same({}, removed_files)
             assert.are.equal("book-upload-error", states[1].state)
+        end)
+
+        it("rescans the library when the uploaded book cannot be found", function()
+            local attempts = 0
+
+            local upload, api = make_upload({
+                uploadBook = spy.new(function() return false, 409, "File already exists" end),
+                findBook = spy.new(function()
+                    attempts = attempts + 1
+
+                    if attempts <= 6 then
+                        return true, nil
+                    end
+
+                    return true, { id = 42 }
+                end),
+            })
+            local states = {}
+
+            upload:uploadBooks(collect_states(states))
+
+            assert.spy(api.refreshLibrary).was_called_with(api, 1)
+            assert.are.same({ "/mnt/onboard/wikipedia/article.epub" }, removed_files)
+            assert.are.equal("book-uploaded", states[1].state)
+        end)
+
+        it("asks for a rescan only once per run", function()
+            fake_files = {
+                "/mnt/onboard/wikipedia/article.epub",
+                "/mnt/onboard/wikipedia/other.epub",
+            }
+
+            local upload, api = make_upload({
+                findBook = spy.new(function() return true, nil end),
+            })
+
+            upload:uploadBooks(collect_states({}))
+
+            assert.spy(api.refreshLibrary).was_called(1)
+        end)
+
+        it("does not look again when the rescan fails", function()
+            local upload, api = make_upload({
+                findBook = spy.new(function() return true, nil end),
+                refreshLibrary = spy.new(function() return false, "Forbidden" end),
+            })
+            local states = {}
+
+            upload:uploadBooks(collect_states(states))
+
+            assert.spy(api.findBook).was_called(6)
+            assert.are.same({}, removed_files)
+            assert.are.equal("book-upload-pending", states[1].state)
         end)
 
         it("keeps the local copy when the shelf cannot be assigned", function()

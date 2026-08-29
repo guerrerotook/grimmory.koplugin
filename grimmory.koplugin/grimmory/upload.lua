@@ -94,6 +94,7 @@ end
 ---@field settings GrimmorySettings
 ---@field api GrimmoryAPI
 ---@field doc_metadata GrimmoryDocMetadata
+---@field library_refreshed boolean | nil
 local GrimmoryUpload = {}
 
 function GrimmoryUpload:new(o)
@@ -201,6 +202,38 @@ function GrimmoryUpload:waitForProcessedBook(title, filename, strict)
     return nil
 end
 
+-- Grimmory only turns a file into a book when its watcher sees the file
+-- being written, and that watcher misses a file that was already on disk
+-- when it started.  An upload the server refuses because the file is
+-- there while no book of it exists is exactly that leftover, and only a
+-- rescan of the library makes Grimmory read it.  One rescan covers every
+-- leftover in the library, so it is only asked for once per run.
+---@return boolean requested
+function GrimmoryUpload:refreshLibrary()
+    if self.library_refreshed then
+        return false
+    end
+
+    self.library_refreshed = true
+
+    local library = self.settings:getUploadLibrary()
+
+    if library == nil or library.id == nil then
+        return false
+    end
+
+    logger:info("Asking Grimmory to rescan library:", library.id)
+
+    local ok, message = self.api:refreshLibrary(library.id)
+
+    if not ok then
+        logger:err("Failed to ask Grimmory to rescan library:", library.id, "-", message)
+        return false
+    end
+
+    return true
+end
+
 ---@param path string
 function GrimmoryUpload:removeLocalBook(path)
     logger:info("Removing uploaded book at:", path)
@@ -253,14 +286,19 @@ function GrimmoryUpload:uploadBook(path, callback)
 
     local book = self:waitForProcessedBook(title, filename, is_duplicate)
 
+    if book == nil and self:refreshLibrary() then
+        -- The rescan reads whatever the watcher missed, so the book the
+        -- upload was waiting for can turn up after it.
+        book = self:waitForProcessedBook(title, filename, is_duplicate)
+    end
+
     if book == nil then
         if is_duplicate then
             -- Grimmory stores a file under this name but no book of this
-            -- title exists, so there is nothing to remove locally.  The
-            -- file stays where it is in case the library still has to
-            -- pick the stored file up.
+            -- title exists even after a rescan, so there is nothing to
+            -- remove locally.  The file stays where it is.
             logger:err(
-                "Grimmory already stores a file with this name but holds no matching book for:",
+                "Grimmory stores a file with this name but has no book for it even after a rescan:",
                 path
             )
 
@@ -325,6 +363,8 @@ function GrimmoryUpload:uploadBooks(callback)
         logger:dbg("Book upload skipped because feature is disabled")
         return
     end
+
+    self.library_refreshed = false
 
     local directory = resolve_directory(self.settings:getUploadDirectory())
 

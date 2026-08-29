@@ -835,6 +835,31 @@ function GrimmoryAPI:getLibraries()
     return true, libraries
 end
 
+-- Grimmory only turns a file into a book when its watcher sees the file
+-- arrive, so a file that is already on disk stays invisible until the
+-- library is rescanned.  A rescan is what picks those leftovers up.
+---@param library_id number
+---@return boolean ok
+---@return string | nil message
+function GrimmoryAPI:refreshLibrary(library_id)
+    local ok, code, body = self:request(
+        "PUT",
+        "/api/v1/libraries/" .. tostring(library_id) .. "/refresh"
+    )
+
+    if not ok then
+        logger:err("Unable to refresh library:", library_id, "-", body)
+
+        if type(body) == "string" then
+            return false, body
+        end
+
+        return false, "HTTP Error: " .. tostring(code)
+    end
+
+    return true, nil
+end
+
 -- Uploads a book file into a library path.  Grimmory answers as soon as
 -- the file has been stored; the book itself only shows up once the
 -- server has processed it, so callers have to look it up afterwards.
