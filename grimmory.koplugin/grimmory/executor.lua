@@ -226,6 +226,7 @@ function GrimmoryExecutor:background(callback, with_wifi)
 
         UIManager:preventStandby()
 
+        -- Connect before the callback checks connectivity, even if it never starts a subprocess.
         local wifi_needs_disable = false
         if with_wifi then
             logger:dbg("Execution requested WiFi")
@@ -354,7 +355,7 @@ function GrimmoryExecutor:background(callback, with_wifi)
         UIManager:allowStandby()
 
         if not ok then
-            error(err)
+            error(err, 0)
         end
     end)
 end
