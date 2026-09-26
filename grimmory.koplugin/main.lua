@@ -441,6 +441,10 @@ function Grimmory:refreshUI()
 end
 
 function Grimmory:onGrimmorySync(verbose, book_path, refresh_book)
+    if not self:isReadyToSync() then
+        return
+    end
+
     -- Tell everything to flush so we have data available for our sync
     UIManager:broadcastEvent(Event:new("FlushSettings"))
 
