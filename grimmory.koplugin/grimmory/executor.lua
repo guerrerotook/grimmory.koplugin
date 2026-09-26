@@ -224,19 +224,16 @@ function GrimmoryExecutor:background(callback, with_wifi)
             was_terminated = true
         end
 
+        UIManager:preventStandby()
+
+        local wifi_needs_disable = false
+        if with_wifi then
+            logger:dbg("Execution requested WiFi")
+            wifi_needs_disable = enable_wifi()
+        end
+
         local function run_in_background(runnable, on_progress)
-            UIManager:preventStandby()
-
-            -- We want the executor to attempt to connect to wifi before it runs
-            -- anything, and if it turns this on we should disable it afterwards, too.
-            local wifi_needs_disable = false
-            if with_wifi then
-                logger:dbg("Execution requested WiFi")
-                wifi_needs_disable = enable_wifi()
-            end
-
             if was_terminated then
-                UIManager:allowStandby()
                 return false, "Termianted before starting subprocess"
             end
 
@@ -282,7 +279,6 @@ function GrimmoryExecutor:background(callback, with_wifi)
 
             if was_terminated then
                 ffiutil.terminateSubProcess(subprocess_pid)
-                UIManager:allowStandby()
                 return false, "Terminated before starting subprocess"
             end
 
@@ -344,18 +340,22 @@ function GrimmoryExecutor:background(callback, with_wifi)
                 end
             end
 
-            UIManager:allowStandby()
-
-            -- If wifi was enabled, disable it again
-            if wifi_needs_disable then
-                logger:dbg("Disabling WiFi after execution")
-                NetworkManager:turnOffWifi()
-            end
-
             return subprocess_ok, subprocess_result
         end
 
-        callback(run_in_background, terminate)
+        local ok, err = xpcall(function()
+            callback(run_in_background, terminate)
+        end, debug.traceback)
+
+        if wifi_needs_disable then
+            logger:dbg("Disabling WiFi after execution")
+            NetworkManager:turnOffWifi()
+        end
+        UIManager:allowStandby()
+
+        if not ok then
+            error(err)
+        end
     end)
 end
 
