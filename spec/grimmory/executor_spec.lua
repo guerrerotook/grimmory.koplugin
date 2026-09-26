@@ -27,7 +27,11 @@ local function make_executor(initial_wifi_on)
     }
 
     local mocks = {
-        ["ffi/util"] = {},
+        ["ffi/util"] = {
+            runInSubProcess = function() return 42, 1 end,
+            getNonBlockingReadSize = function() return 0 end,
+            isSubProcessDone = function() return true end,
+        },
         ["ffi"] = {},
         ["json"] = {},
         ["device"] = { hasWifiToggle = function() return true end },
@@ -61,6 +65,22 @@ local function make_executor(initial_wifi_on)
 end
 
 describe("GrimmoryExecutor Wi-Fi", function()
+    it("keeps Wi-Fi on until the subprocess run returns", function()
+        local executor, state = make_executor(false)
+
+        executor:background(function(run)
+            assert.is_true(select(1, state()))
+            run(function() end, function() end)
+            assert.is_true(select(1, state()))
+        end, true)
+
+        local wifi_on, turned_on, turned_off, standby = state()
+        assert.is_false(wifi_on)
+        assert.are.equal(1, turned_on)
+        assert.are.equal(1, turned_off)
+        assert.are.equal(0, standby)
+    end)
+
     it("connects before invoking the sync callback and restores Wi-Fi afterward", function()
         local executor, state = make_executor(false)
         local callback_ran = false
